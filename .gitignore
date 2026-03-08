@@ -1,0 +1,13 @@
+**/.*/
+!.github/
+**/build*/
+**/*build/
+**/cmake-build-*/
+**/venv*/
+**/*venv/
+**/__pycache__/
+/.clang-format
+/.clang-tidy
+/.cmake-format.yaml
+/mull.yml
+/requirements.txt
