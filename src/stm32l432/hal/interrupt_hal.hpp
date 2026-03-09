@@ -99,7 +99,7 @@ struct disable_interrupts_lock {
 };
 
 inline void trigger_interrupt(int v) {
-    // interrupt set-enable register
+    // software trigger interrupt register
     auto NVIC_STIR = (std::uint32_t volatile *const)(0xe000'ef00);
     *NVIC_STIR = v;
 }
