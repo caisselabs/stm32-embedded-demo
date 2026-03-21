@@ -7,7 +7,8 @@
 #pragma once
 #include <flow/service.hpp>
 #include <interrupt/config.hpp>
-#include <interrupt/flows.hpp>
+
+#include <hal/interrupt_flows.hpp>
 
 namespace interrupt {
 using interrupt::operator""_irq;
@@ -15,7 +16,7 @@ using interrupt::operator""_irq;
 // clang-format off
 using config =
     interrupt::root<
-        irq<"irq_12", 12_irq, 4, policies<>, isr_12>
+        irq<"irq_12", 12_irq, 4, policies<>, isr_dma1_ch2>
     >;
 // clang-format on
 } // namespace interrupt
