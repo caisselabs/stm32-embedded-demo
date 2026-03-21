@@ -6,13 +6,13 @@
 //
 #pragma once
 
-#include <interrupt/flows.hpp>
+#include <hal/interrupt_flows.hpp>
 
 namespace interrupt {
 struct module {
     constexpr static auto config = cib::config( //
         cib::exports<                           //
-            isr_12                              //
+            isr_dma1_ch2                        //
             >);
 };
 } // namespace interrupt
