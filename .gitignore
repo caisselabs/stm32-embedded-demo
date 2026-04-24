@@ -11,3 +11,4 @@
 /.cmake-format.yaml
 /mull.yml
 /requirements.txt
+*~
