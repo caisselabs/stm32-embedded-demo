@@ -15,16 +15,20 @@ project(
 include(cmake/get_cpm.cmake)
 cpmaddpackage("gh:intel/cicd-repo-infrastructure#dev")
 
-add_versioned_package("gh:intel/cpp-baremetal-concurrency#63230eb")
-add_versioned_package("gh:intel/cpp-std-extensions#c162ade")
-add_versioned_package("gh:intel/cpp-baremetal-senders-and-receivers#bd96d20")
-add_versioned_package("gh:intel/generic-register-operation-optimizer#d365927")
+add_versioned_package("gh:intel/cpp-baremetal-concurrency#5592717")
+add_versioned_package("gh:intel/cpp-std-extensions#0f91ae4")
+add_versioned_package("gh:intel/cpp-baremetal-senders-and-receivers#7a050b0")
+add_versioned_package("gh:intel/generic-register-operation-optimizer#ab8e839")
 add_versioned_package("gh:caisselabs/stm32-groov#6769da8")
-add_versioned_package("gh:intel/compile-time-init-build#542f94a")
+add_versioned_package("gh:intel/compile-time-init-build#66e06e3")
 
 
 
-# --------------------------------------------------------------------------
+if(NOT CMAKE_CROSSCOMPILING)
+  add_subdirectory(src/i2c)
+  add_subdirectory(src/shared)
+endif()
+
 # --------------------------------------------------------------------------
 add_executable(demo
   src/main.cpp
