@@ -46,6 +46,26 @@ template <typename F> struct receiver {
 };
 template <typename F> receiver(F) -> receiver<F>;
 
+template <typename F> struct error_receiver {
+    using is_receiver = void;
+    constexpr auto set_value(auto &&...) const && -> void {}
+    constexpr auto set_error(auto &&...args) const && -> void {
+        f(std::forward<decltype(args)>(args)...);
+    }
+    constexpr auto set_stopped() const && -> void {}
+    F f;
+};
+template <typename F> error_receiver(F) -> error_receiver<F>;
+
+template <typename F> struct stop_receiver {
+    using is_receiver = void;
+    constexpr auto set_value(auto &&...) const && -> void {}
+    constexpr auto set_error(auto &&...) const && -> void {}
+    constexpr auto set_stopped() const && -> void { f(); }
+    F f;
+};
+template <typename F> stop_receiver(F) -> stop_receiver<F>;
+
 template <typename T>
 constexpr auto unique_name =
     stdx::ct_string<stdx::type_as_string<T>().size() + 1>{
@@ -177,6 +197,74 @@ TEMPLATE_TEST_CASE("release adaptor forwards upstream values with waiter",
     CHECK(waiter_woke);
 
     // Clean up: the waiter holds the bus; release so state is reset.
+    CHECK((async::just() | region::release<name>() | async::sync_wait())
+              .has_value());
+    CHECK(region::detail::waiters_<name> == 0);
+}
+
+TEMPLATE_TEST_CASE("release adaptor fires on error channel and forwards error",
+                   "[region]", decltype([] {})) {
+    constexpr auto name = unique_name<TestType>;
+    region::detail::waiters_<name> = 1;
+
+    int err = 0;
+    auto op = async::connect(async::just_error(123) | region::release<name>(),
+                             error_receiver{[&](int e) { err = e; }});
+    async::start(op);
+    CHECK(err == 123);
+    CHECK(region::detail::waiters_<name> == 0);
+}
+
+TEMPLATE_TEST_CASE("release adaptor fires on error channel and wakes waiter",
+                   "[region]", decltype([] {})) {
+    constexpr auto name = unique_name<TestType>;
+    region::detail::waiters_<name> = 1;
+
+    bool waiter_woke = false;
+    auto wait_op = async::connect(async::just() | region::acquire<name>(),
+                                  receiver{[&] { waiter_woke = true; }});
+    async::start(wait_op);
+
+    auto op = async::connect(async::just_error(0) | region::release<name>(),
+                             universal_receiver{});
+    async::start(op);
+    CHECK(waiter_woke);
+
+    // Clean up: drain the waiter that now holds the bus.
+    CHECK((async::just() | region::release<name>() | async::sync_wait())
+              .has_value());
+    CHECK(region::detail::waiters_<name> == 0);
+}
+
+TEMPLATE_TEST_CASE("release adaptor fires on stop channel and forwards stop",
+                   "[region]", decltype([] {})) {
+    constexpr auto name = unique_name<TestType>;
+    region::detail::waiters_<name> = 1;
+
+    bool stopped = false;
+    auto op = async::connect(async::just_stopped() | region::release<name>(),
+                             stop_receiver{[&] { stopped = true; }});
+    async::start(op);
+    CHECK(stopped);
+    CHECK(region::detail::waiters_<name> == 0);
+}
+
+TEMPLATE_TEST_CASE("release adaptor fires on stop channel and wakes waiter",
+                   "[region]", decltype([] {})) {
+    constexpr auto name = unique_name<TestType>;
+    region::detail::waiters_<name> = 1;
+
+    bool waiter_woke = false;
+    auto wait_op = async::connect(async::just() | region::acquire<name>(),
+                                  receiver{[&] { waiter_woke = true; }});
+    async::start(wait_op);
+
+    auto op = async::connect(async::just_stopped() | region::release<name>(),
+                             universal_receiver{});
+    async::start(op);
+    CHECK(waiter_woke);
+
+    // Clean up: drain the waiter that now holds the bus.
     CHECK((async::just() | region::release<name>() | async::sync_wait())
               .has_value());
     CHECK(region::detail::waiters_<name> == 0);

@@ -19,6 +19,7 @@
 #include <async/concepts.hpp>
 #include <async/connect.hpp>
 #include <async/debug.hpp>
+#include <async/env.hpp>
 #include <async/just.hpp>
 #include <async/just_result_of.hpp>
 #include <async/let_value.hpp>
@@ -30,6 +31,9 @@
 #include <stdx/ct_string.hpp>
 
 #include <conc/concurrency.hpp>
+
+#include <type_traits>
+#include <utility>
 
 namespace region {
 
@@ -66,7 +70,8 @@ template <stdx::ct_string Name> struct acquire_sender {
         return {};
     }
 
-    template <async::receiver R> [[nodiscard]] constexpr auto connect(R &&r) {
+    template <async::receiver R>
+    [[nodiscard]] constexpr auto connect(R &&r) const {
         async::check_connect<acquire_sender, R>();
         return op_state<Name, std::remove_cvref_t<R>>{std::forward<R>(r)};
     }
@@ -107,6 +112,80 @@ constexpr auto op_state<Name, Rcvr>::start() & -> void {
     }
 }
 
+template <stdx::ct_string Name> auto do_release() -> void {
+    auto const has_waiter = conc::call_in_critical_section<mutex<Name>>(
+        []() -> bool { return (--waiters_<Name> != 0); });
+    if (has_waiter) {
+        async::run_one_trigger<Name>();
+    }
+}
+
+template <stdx::ct_string Name, typename Rcvr> struct release_receiver {
+    using is_receiver = void;
+    [[no_unique_address]] Rcvr rcvr;
+
+    [[nodiscard]] constexpr auto query(async::get_env_t) const
+        -> async::forwarding_env<async::env_of_t<Rcvr>> {
+        return async::forward_env_of(rcvr);
+    }
+
+    template <typename... Args>
+    constexpr auto set_value(Args &&...args) && -> void {
+        do_release<Name>();
+        async::set_value(std::move(rcvr), std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    constexpr auto set_error(Args &&...args) && -> void {
+        do_release<Name>();
+        async::set_error(std::move(rcvr), std::forward<Args>(args)...);
+    }
+    constexpr auto set_stopped() && -> void {
+        do_release<Name>();
+        async::set_stopped(std::move(rcvr));
+    }
+};
+
+template <stdx::ct_string Name, async::sender S> struct release_sender {
+    using is_sender = void;
+    [[no_unique_address]] S s;
+
+    template <typename Env>
+    [[nodiscard]] constexpr static auto get_completion_signatures(Env const &)
+        -> async::completion_signatures_of_t<S, Env> {
+        return {};
+    }
+
+    template <async::receiver R>
+    [[nodiscard]] constexpr auto connect(R &&r) && {
+        async::check_connect<release_sender &&, R>();
+        return async::connect(
+            std::move(s),
+            release_receiver<Name, std::remove_cvref_t<R>>{std::forward<R>(r)});
+    }
+
+    template <async::receiver R>
+        requires async::multishot_sender<
+            S, async::detail::universal_receiver<async::env_of_t<R>>>
+    [[nodiscard]] constexpr auto connect(R &&r) const & {
+        async::check_connect<release_sender const &, R>();
+        return async::connect(
+            s,
+            release_receiver<Name, std::remove_cvref_t<R>>{std::forward<R>(r)});
+    }
+
+    [[nodiscard]] constexpr auto query(async::get_env_t) const {
+        return async::forward_env_of(s);
+    }
+};
+
+template <stdx::ct_string Name> struct release_pipeable {
+  private:
+    template <async::sender S, stdx::same_as_unqualified<release_pipeable> Self>
+    friend constexpr auto operator|(S &&s, Self &&) -> async::sender auto {
+        return release_sender<Name, std::remove_cvref_t<S>>{std::forward<S>(s)};
+    }
+};
+
 } // namespace detail
 
 template <stdx::ct_string Name> constexpr auto acquire() {
@@ -114,14 +193,7 @@ template <stdx::ct_string Name> constexpr auto acquire() {
 }
 
 template <stdx::ct_string Name> constexpr auto release() {
-    return async::then([]() {
-        auto const has_waiter =
-            conc::call_in_critical_section<detail::mutex<Name>>(
-                []() -> bool { return (--detail::waiters_<Name> != 0); });
-        if (has_waiter) {
-            async::run_one_trigger<Name>();
-        }
-    });
+    return async::compose(detail::release_pipeable<Name>{});
 }
 
 template <stdx::ct_string Name, async::sender S>
