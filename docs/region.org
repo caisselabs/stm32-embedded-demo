@@ -9,19 +9,75 @@ This facility serializes access through an exclusive region. Multiple senders ca
 
 Every entry point is templated on a compile-time string ~Name~ that uniquely identifies the exclusive region. Each distinct ~Name~ produces an independent region with its own queue.
 
+~within~ is the entire public interface.
+
 
 *** ~region::within~
 
 #+begin_src cpp
-template <stdx::ct_string Name, async::sender S>
-auto within(S &&s) -> async::sender auto;
+template <stdx::ct_string Name, typename S>
+auto within(S &&s);
 #+end_src
 
-Returns a sender that acquires the region, runs ~s~, then releases the region. This is the primary interface.
+Returns a composed adaptor that runs ~s~ inside the exclusive region ~Name~:
 
-The returned sender completes with ~s~'s value channel — values from ~s~ flow through the ~release~ to the downstream receiver unchanged.
+#+begin_src cpp
+a | region::within<Name>(s) | b;
+#+end_src
 
-Models ~region::acquire<Name>() | seq(s) | region::release<Name>()~.
+The region is acquired before ~s~ is started and released after. Acquisition suspends in FIFO order while the region is busy; the completion then flows on to ~s~ (or past it) and finally to ~b~.
+
+**** ~s~ may be a sender or a composed adaptor
+
+~s~ is treated differently depending on what it is:
+
+- If ~s~ is a *sender*, it is sequenced after the acquire. It runs only when the upstream completes with a *value*; an upstream *error* or *stop* skips ~s~ and propagates unchanged. This is the ~async::seq(s)~ behaviour:
+
+  #+begin_src cpp
+  a | region::within<Name>(s) | b     // s is a sender
+  #+end_src
+
+  is as-if
+
+  #+begin_src cpp
+  a | acquire<Name> | async::seq(s) | release<Name> | b
+  #+end_src
+
+- If ~s~ is a *composed adaptor*, the upstream completion — value, error, *or* stop — is threaded straight into it:
+
+  #+begin_src cpp
+  a | region::within<Name>(s) | b     // s is an adaptor
+  #+end_src
+
+  is as-if
+
+  #+begin_src cpp
+  a | acquire<Name> | s | release<Name> | b
+  #+end_src
+
+**** Acquire and release are always balanced
+
+Regardless of the upstream completion channel or the type of ~s~, the region is *always* acquired before ~s~ and *always* released after. An upstream error or stop still takes its turn in the FIFO and still cycles the region — it does not short-circuit the acquire/release pair. This helps with temporal reasoning. (The one exception is cancellation of a *queued* ~within~ — see below — which never acquires and so never releases.)
+
+Balanced is not the same as clean. The region is released on *every* channel ~s~ can complete on, including the error channel — and it is released before the completion reaches anything downstream of ~within~. If ~s~ can fail partway through and leave the shared resource in a state the next user does not expect, that is your problem to solve, and you must solve it inside ~s~. See [[*Leave the resource clean before you leave the region][Leave the resource clean before you leave the region]].
+
+**** Standalone use
+
+~within~ is an adaptor; it needs an upstream. When there is no meaningful upstream (a self-contained transaction), seed it with a value:
+
+#+begin_src cpp
+async::just() | region::within<Name>(s);
+#+end_src
+
+With a ~just()~ upstream the completion is a value, so a sender ~s~ always runs.
+
+**** Cancellation
+
+A ~within~ that is *queued* waiting for the region is cancellable. If the receiver's stop token is triggered while ~within~ is waiting in the FIFO, it removes itself from the queue, gives up its place, and completes on the stopped channel. Because it never acquired the region, ~s~ does not run and the region is not released — the current holder and the other waiters are undisturbed.
+
+Cancellation only applies while waiting. Once ~within~ has been handed the region it runs to completion; a stop that arrives after the hand-off has no effect on that transaction. A stop already pending when ~within~ starts is honoured immediately — it completes stopped without acquiring, even if the region is free.
+
+A receiver whose stop token can never fire (the default) pays nothing for this: the cancellation machinery specializes away entirely.
 
 **** Example
 
@@ -30,55 +86,23 @@ auto s1 = calc_a() | region::within<"hw_bus">(send_data) | start_detached();
 auto s2 = calc_b() | region::within<"hw_bus">(send_data) | start_detached();
 #+end_src
 
-Imagine the results of `calc_a` and `calc_b` are sent in the value channel. `send_data` will receive the data and send it out the hardware, one byte at a time. The data must be sent as a set. Sending the data from `calc_a` and `calc_b` on the hardware at the same time will result in corrupted data. `region::within<"hw_bus">` ensures that only one `send_data` will be executing at a time.
-
-
-*** ~region::acquire~
-
-#+begin_src cpp
-template <stdx::ct_string Name>
-auto acquire();
-#+end_src
-
-Returns a pipeable adaptor. ~upstream | region::acquire<Name>()~ produces a sender that runs ~upstream~, then acquires the region, and finally re-emits ~upstream~'s values on the value channel. A downstream like ~then([](int v){...})~ sees the value that was on the wire before acquire.
-
-If the region is free, acquire completes immediately. If the region is busy, the sender is enqueued and suspends until the current holder calls ~release~.
-
-#+begin_quote
-Don't be a monster, prefer ~within~ over manually pairing ~acquire~ and ~release~.
-#+end_quote
-
-
-*** ~region::release~
-
-#+begin_src cpp
-template <stdx::ct_string Name>
-auto release();
-#+end_src
-
-Returns a pipeable adaptor. ~upstream | region::release<Name>()~ runs ~upstream~, then releases the exclusive region. If a sender is waiting for the exclusive region, it hands ownership off to the longest waiting sender; otherwise the region is now free.
-
-For ~upstream | region::release<Name>()~, ~release~ will pass through the values generated by upstream.
-
-#+begin_quote
-Don't be monster, prefer ~within~ over manually pairing ~acquire~ and ~release~.
-#+end_quote
+Imagine the results of ~calc_a~ and ~calc_b~ are sent on the value channel. ~send_data~ (a composed adapter) receives the upstream data and clocks the bits out of the hardware, one byte at a time. The data must be sent as a set; sending the bytes from ~calc_a~ and ~calc_b~ at the same time would corrupt the stream. ~region::within<"hw_bus">~ ensures only one ~send_data~ executes at a time.
 
 
 *** Free Black Eye
 
 The ~region~ facility can be great or it can be a poke-in-the-eye.
 
-The a waiting sender will run in the context of the ~region::release~. In the world of hardware, this is most often what you want... but this can be surprising.
+A waiting sender runs in the context of the ~region::detail::release~ that hands off to it. In the world of hardware, this is most often what you want... but it can be surprising.
 
-An example will help (we are going to use the primitives to make it clear... don't use the primitives, use ~within~ like a sophesticated user):
-
+An example will help. We use the ~detail~ primitives here to make the mechanism explicit — don't use the primitives, use ~within~:
 
 #+begin_src cpp
+  namespace detail = region::detail;
   auto wait_done = continue_on(trigger_scheduler<"wait_done">{});
 
-  auto s1 = a | region::acquire<"a">() | load_hw() | wait_done | region::release<"a">() | b;
-  auto s2 = c | region::acquire<"a">() | load_hw() | wait_done | region::release<"a">() | d;
+  auto s1 = a | detail::acquire<"a">() | load_hw() | wait_done | detail::release<"a">() | b;
+  auto s2 = c | detail::acquire<"a">() | load_hw() | wait_done | detail::release<"a">() | d;
 
   start_detached(s1);
   start_detached(s2);
@@ -86,23 +110,60 @@ An example will help (we are going to use the primitives to make it clear... don
   void on_irq42() { triggers<"wait_done">.run(); }
 #+end_src
 
-Let's say ~s1~ acquires the exclusive region first. Conceptually, ~s2~'s ~load_hw~ is first in the FIFO for the exclusive region.
+Let's say ~s1~ acquires the region first. Conceptually, ~s2~'s ~load_hw~ is first in the FIFO for the region.
 
-  1. ~s1~ ~load_hw~ completes (imagine this is a ~then~).
+  1. ~s1~ ~load_hw~ completes (imagine this is a ~then~ that writes to some MMIO registers).
   2. ~s1~ ~wait_done~ schedules on the ~trigger_scheduler<"wait_done">~ and the context returns.
   3. In our isolated little example here, nothing else is happening.
   4. IRQ 42 fires and ~on_irq42~ is called from the ISR context.
   5. From the ISR context, ~s1~ ~release~ is called.
-  6. The ~release~ logic will notice that a sender is queued and waiting for the exclusive region.
+  6. The ~release~ logic notices that a sender is queued and waiting for the region.
   7. From the ISR context, ~s2~ ~load_hw~ is started and completes.
   8. From the ISR context, ~s2~ ~wait_done~ schedules on the trigger scheduler.
   9. From the ISR context, ~b~ is started.
 
 There isn't anything unique or special about this behaviour, but it could be surprising. When you are doing hardware activities like trying to keep a buffer full for a slow serial communication port (i2c, spi, ...), this is exactly what you are looking for.
 
-If you need to control the context more carefully, ~continue_on~ right after the ~acquire~:
+**** Watch the stack
+
+The hand-off runs on the *caller's stack*. If the woken sender itself completes synchronously and releases the region, it hands off to the *next* waiter from within that same ~release~ — and so on down the queue. Each hand-off is a nested call, so a run of waiters that all complete synchronously recurses to a depth proportional to the queue length, rather than unwinding between them.
+
+In the example above the chain naturally breaks: each ~s~ suspends at ~wait_done~ (the ~trigger_scheduler~), so ~release~ returns before the next transaction runs and the stack unwinds each time. But if the region body completes *synchronously* — no ~wait_done~, no scheduler hop, just ~then~/~just~-style work — then draining a long FIFO of waiters happens in one deep recursion. On a small embedded stack that can exhaust it and fault.
+
+If you cannot bound the number of waiters, or the region body may complete synchronously, break the chain by hopping schedulers so each hand-off returns before the next body runs — the same ~continue_on~ shown below does this, because the woken sender reschedules instead of running to completion inline.
+
+If you need to control the context more carefully, use ~continue_on~ right after the acquire. Using ~within~, pass a composed adaptor whose first step is the ~continue_on~ so the upstream is threaded into it:
 
 #+begin_src cpp
   auto s1 = a | region::within<"a">( continue_on(S) | stuff ) | b;
 #+end_src
 
+**** Leave the resource clean before you leave the region
+
+The hand-off happens *before* the completion is forwarded downstream. ~release~ gives the region to the next waiter — running it, synchronously, right there — and only *then* calls its own receiver. So anything chained *after* ~within~ runs when the next transaction is already underway:
+
+#+begin_src cpp
+  a | region::within<Name>(s) | recover | b
+#+end_src
+
+~recover~ is too late. By the time it runs, the next waiter owns the region and may already have touched the hardware. Putting the fix-up downstream does not just fail to help — it can stomp on the transaction that has taken your place.
+
+Put it inside ~s~, so it completes before the release:
+
+#+begin_src cpp
+  a | region::within<Name>(s | recover) | b
+#+end_src
+
+This bites hardest on the *error* channel, because downstream is the natural-looking place to handle an error and it is exactly the wrong place. Consider a bus transaction that fails halfway:
+
+#+begin_src cpp
+  // WRONG: the next waiter starts a transfer on a bus that was never
+  // returned to idle, with the peripheral's error flags still latched.
+  send | region::within<"bus">(xfer) | async::upon_error(reset_bus) | b;
+
+  // RIGHT: the bus is idle and the flags are cleared before the region
+  // is released, so the next waiter inherits a peripheral it can use.
+  send | region::within<"bus">(xfer | async::upon_error(reset_bus)) | b;
+#+end_src
+
+The rule: whatever invariant the next user of the region relies on must be re-established before ~s~ completes, on every channel ~s~ can complete on — value, error, *and* stop. A region serializes access; it does not restore state. Recovery that lives outside the region is recovery that runs after someone else has already started.
