@@ -14,7 +14,12 @@ set( CROSS_COMPILE "arm-none-eabi-")
 set( CMAKE_C_COMPILER   "${TC_PATH}${CROSS_COMPILE}gcc" )
 set( CMAKE_CXX_COMPILER "${TC_PATH}${CROSS_COMPILE}g++" )
 set( CMAKE_LINKER       "${TC_PATH}${CROSS_COMPILE}ld" )
-set( CMAKE_AR           "${TC_PATH}${CROSS_COMPILE}ar" )
+set( CMAKE_AR           ${TC_PATH}${CROSS_COMPILE}gcc-ar
+     CACHE FILEPATH "The toolchain ar command (LTO plugin aware)" FORCE )
+set( CMAKE_RANLIB       ${TC_PATH}${CROSS_COMPILE}gcc-ranlib
+     CACHE FILEPATH "The toolchain ranlib command (LTO plugin aware)" FORCE )
+set( CMAKE_NM           ${TC_PATH}${CROSS_COMPILE}gcc-nm
+     CACHE FILEPATH "The toolchain nm command (LTO plugin aware)" FORCE )
 
 # We must set the OBJCOPY setting into cache so that it's available to the
 # whole project. Otherwise, this does not get set into the CACHE and therefore
