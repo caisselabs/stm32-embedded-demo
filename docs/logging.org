@@ -1,0 +1,116 @@
+* Binary Logging
+
+The demo uses CIB's binary logger. Log strings never appear in the
+executable: each call site sends a catalogued 32-bit string ID (plus any
+runtime arguments) encoded per the MIPI Sys-T spec. The IDs are assigned at
+build time and the text is recovered off-target by a decoder.
+
+** How the build is wired
+
+The catalogue is produced by CIB's ~gen_str_catalog~ CMake function, which
+needs a *library* to inspect. So the application is split:
+
+- ~demo_lib~ (~src/app.cpp~) --- all the real code, including every log call
+  site.
+- ~demo~ (~src/main.cpp~) --- a stub whose ~main~ just calls ~app_run()~. It
+  must contain no log call sites.
+
+~gen_str_catalog~ then:
+
+1. runs ~nm -uC~ over ~libdemo_lib.a~. The undefined symbols are exactly the
+   ~catalog<...>()~ / ~module<...>()~ specializations the logger needs, and
+   the string data is carried in their template arguments.
+2. generates ~build/log_strings.cpp~ --- one-line functions returning the
+   assigned IDs --- which is compiled into ~demo_log_strings~ and linked into
+   ~demo~. LTO inlines them away.
+3. generates ~build/log_strings.json~ and ~build/log_strings.xml~, the
+   collateral a decoder uses to turn IDs back into text.
+
+*** LTO and ~nm~
+
+The ARM toolchain file selects ~arm-none-eabi-gcc-{ar,ranlib,nm}~ rather than
+the plain binutils. We build with ~-flto~, so object files hold GIMPLE instead
+of a normal symbol table; plain ~nm~ reports *no symbols at all*, which would
+silently produce an empty string catalogue. The ~gcc-*~ wrappers load the LTO
+plugin and see the symbols.
+
+** Where the logs go
+
+~src/logging/log_config.hpp~ specializes ~logging::config<>~ with
+~logging::binary::config{app_log::log_destination{}}~.
+
+Every translation unit that logs must include this header --- not
+~<log/log.hpp>~ --- so that all of them see the same specialization. Two TUs
+seeing different specializations is an ODR violation.
+
+The destination is currently a circular buffer of 32-bit words in RAM
+(~app_log::buffer~). There is no log transport on the board yet; replace
+~log_destination::operator()~ with a UART/SWO writer when there is one, and
+nothing else has to change.
+
+~logging::binary::log_writer~ wraps each destination call in
+~conc::call_in_critical_section~, so logging from an ISR is safe given
+~hal::concurrency_policy~.
+
+** Using it
+
+#+begin_src cpp
+#include <logging/log_config.hpp>
+
+auto f() -> void {
+    CIB_LOG_MODULE("app");          // scopes the module ID for this scope
+    CIB_INFO("Booting");
+    CIB_WARN("The answer is {}", x);
+}
+#+end_src
+
+Arguments known at compile time are formatted at compile time; only runtime
+arguments are sent along with the ID.
+
+CIB's flow machinery logs at ~TRACE~, so ~flow.start(...)~ / ~flow.end(...)~
+entries appear in the catalogue for free.
+
+** Decoding
+
+Dump the buffer from GDB and run it through CIB's decoder:
+
+#+begin_src sh
+# in gdb, after halting the target
+(gdb) p app_log::buffer.total_words
+(gdb) dump binary value log.bin app_log::buffer.words
+
+# on the host
+python3 <cib>/python/cib/log_decode.py \
+    --input log.bin --json build/log_strings.json
+#+end_src
+
+~<cib>~ is the CPM checkout, ~build/_deps/compile-time-init-build-src~. The
+decoder handles Short32, Short64 and Catalog messages.
+
+Note that the buffer wraps: if ~total_words > capacity~ the oldest words have
+been overwritten and the stream no longer starts at a message boundary.
+
+** Version logging
+
+~app_log::version_config~ supplies ~CIB_LOG_VERSION()~. ~version_string~ is
+deliberately empty --- a non-empty one makes the encoder emit a MIPI "long
+build" message, which puts the string in the image (defeating the point) and
+hands the destination a byte span rather than a word span.
+
+~CIB_LOG_VERSION()~ is not on the boot path: it emits a MIPI Build message
+(type 0), which the bundled ~log_decode.py~ does not decode.
+
+** Stable string IDs
+
+IDs are assigned per build, so a decoder needs the ~log_strings.json~ from the
+matching build. To keep them stable, copy a build's ~log_strings.json~ into the
+source tree and feed it back:
+
+#+begin_src cmake
+gen_str_catalog(
+  ...
+  STABLE_JSON ${CMAKE_CURRENT_SOURCE_DIR}/log/stable_strings.json
+)
+#+end_src
+
+Matching strings keep their previous IDs; new ones get fresh IDs.
