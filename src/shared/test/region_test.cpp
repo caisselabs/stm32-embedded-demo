@@ -23,6 +23,8 @@
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
+#include <thread>
 #include <vector>
 
 #include <shared/region.hpp>
@@ -104,10 +106,11 @@ TEMPLATE_TEST_CASE("acquire adaptor completes immediately when not busy",
 
     int value = 0;
     auto s = async::just_result_of([&] { value = 42; });
-    CHECK((s | region::detail::acquire<name>() | async::sync_wait()).has_value());
+    CHECK(
+        (s | region::detail::acquire<name>() | async::sync_wait()).has_value());
     CHECK(value == 42);
     CHECK(region::detail::waiters_<name> > 0);
-    CHECK(async::triggers<stdx::cts_t<name>>.empty());
+    CHECK(region::detail::queue_<name>.empty());
 }
 
 TEMPLATE_TEST_CASE("acquire adaptor enqueues when busy", "[region]",
@@ -121,7 +124,7 @@ TEMPLATE_TEST_CASE("acquire adaptor enqueues when busy", "[region]",
                              universal_receiver{});
     async::start(op);
     CHECK_FALSE(past_acquire);
-    CHECK_FALSE(async::triggers<stdx::cts_t<name>>.empty());
+    CHECK_FALSE(region::detail::queue_<name>.empty());
 }
 
 TEMPLATE_TEST_CASE("acquire adaptor forwards upstream values", "[region]",
@@ -204,7 +207,7 @@ TEMPLATE_TEST_CASE("acquire adaptor enqueues on error channel when busy",
     async::start(op);
     // suspended waiting for the region even on the error channel
     CHECK_FALSE(woke);
-    CHECK_FALSE(async::triggers<stdx::cts_t<name>>.empty());
+    CHECK_FALSE(region::detail::queue_<name>.empty());
 
     // hand off: the queued acquire wakes and re-emits the error
     CHECK((async::just() | region::detail::release<name>() | async::sync_wait())
@@ -239,8 +242,9 @@ TEMPLATE_TEST_CASE("release adaptor hands off to queued waiter", "[region]",
 
     // Enqueue a waiter via the acquire sender (connect + start)
     bool acquired = false;
-    auto wait_op = async::connect(async::just() | region::detail::acquire<name>(),
-                                  receiver{[&] { acquired = true; }});
+    auto wait_op =
+        async::connect(async::just() | region::detail::acquire<name>(),
+                       receiver{[&] { acquired = true; }});
     async::start(wait_op);
     CHECK_FALSE(acquired);
 
@@ -270,8 +274,9 @@ TEMPLATE_TEST_CASE("release adaptor forwards upstream values with waiter",
     region::detail::waiters_<name> = 1;
 
     bool waiter_woke = false;
-    auto wait_op = async::connect(async::just() | region::detail::acquire<name>(),
-                                  receiver{[&] { waiter_woke = true; }});
+    auto wait_op =
+        async::connect(async::just() | region::detail::acquire<name>(),
+                       receiver{[&] { waiter_woke = true; }});
     async::start(wait_op);
 
     int got = 0;
@@ -307,8 +312,9 @@ TEMPLATE_TEST_CASE("release adaptor fires on error channel and wakes waiter",
     region::detail::waiters_<name> = 1;
 
     bool waiter_woke = false;
-    auto wait_op = async::connect(async::just() | region::detail::acquire<name>(),
-                                  receiver{[&] { waiter_woke = true; }});
+    auto wait_op =
+        async::connect(async::just() | region::detail::acquire<name>(),
+                       receiver{[&] { waiter_woke = true; }});
     async::start(wait_op);
 
     auto op =
@@ -343,8 +349,9 @@ TEMPLATE_TEST_CASE("release adaptor fires on stop channel and wakes waiter",
     region::detail::waiters_<name> = 1;
 
     bool waiter_woke = false;
-    auto wait_op = async::connect(async::just() | region::detail::acquire<name>(),
-                                  receiver{[&] { waiter_woke = true; }});
+    auto wait_op =
+        async::connect(async::just() | region::detail::acquire<name>(),
+                       receiver{[&] { waiter_woke = true; }});
     async::start(wait_op);
 
     auto op =
@@ -956,5 +963,179 @@ TEMPLATE_TEST_CASE("a mid-region body that completes beats a later cancel",
     // no second release driving the count negative.
     src.request_stop();
     CHECK(stop_count == 0);
+    CHECK(region::detail::waiters_<name> == 0);
+}
+
+// ===================================================================
+// Cross-thread stress
+//
+// The single-threaded cases above pin down the protocol; these hammer the
+// cross-context interleavings they cannot reach. Run under TSan they also
+// check the locking discipline.
+//
+// Deliberately NOT stressed here: a request_stop racing the hand-off of
+// the same op from another thread. That interleaving is broken upstream —
+// async::inplace_stop_source::request_stop invokes a popped callback with
+// no synchronization against the callback's destruction, so a hand-off
+// that completes the acquire (whereupon async::seq immediately reuses the
+// op state's storage for the next stage) leaves request_stop dispatching
+// through freed memory. No arrangement of region-internal locking can
+// close that; it needs std::stop_callback-style destructor/invocation
+// synchronization in the stop source. The single-threaded arbitration
+// tests above ("a hand-off beats a later cancel" etc.) pin region's own
+// logic for that race.
+// ===================================================================
+
+namespace {
+
+// No stop token in the env: the ops are uncancellable, so no stop-source
+// callback traffic exists and every completion is a value.
+struct counting_receiver {
+    using is_receiver = void;
+    std::atomic<int> *value_count;
+    std::atomic<bool> *done;
+
+    auto set_value(auto &&...) const && -> void {
+        ++*value_count;
+        done->store(true);
+    }
+    constexpr auto set_error(auto &&...) const && -> void {}
+    constexpr auto set_stopped() const && -> void {}
+};
+
+struct stress_receiver {
+    using is_receiver = void;
+    async::inplace_stop_token token;
+    std::atomic<int> *stop_count;
+    std::atomic<bool> *done;
+
+    constexpr auto set_value(auto &&...) const && -> void {}
+    constexpr auto set_error(auto &&...) const && -> void {}
+    auto set_stopped() const && -> void {
+        ++*stop_count;
+        done->store(true);
+    }
+    [[nodiscard]] auto query(async::get_env_t) const {
+        return async::env{async::prop{async::get_stop_token_t{}, token}};
+    }
+};
+
+} // namespace
+
+// Fast-path acquires, enqueues, releases, and hand-offs colliding from
+// four threads. Exclusivity must hold (the body is never occupied twice at
+// once — a release choosing a successor must not let a fast-path acquire
+// sneak in beside it), and every op must complete exactly once.
+TEST_CASE("concurrent acquire/release contention", "[region]") {
+    constexpr auto name = stdx::ct_string{"stress"};
+    constexpr auto num_threads = 4;
+    constexpr auto iterations = 500;
+
+    std::atomic<bool> occupied{false};
+    std::atomic<int> violations{};
+    std::atomic<int> value_count{};
+
+    auto const work = [&] {
+        for (auto i = 0; i < iterations; ++i) {
+            std::atomic<bool> done{false};
+            auto body = async::just_result_of([&] {
+                if (occupied.exchange(true)) {
+                    ++violations;
+                }
+                std::this_thread::yield();
+                occupied.store(false);
+            });
+            auto op =
+                async::connect(async::just() | region::within<name>(body),
+                               counting_receiver{std::addressof(value_count),
+                                                 std::addressof(done)});
+            async::start(op);
+            // The op may be queued, with its hand-off arriving from another
+            // thread: it must stay alive until it completes.
+            while (not done.load()) {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (auto t = 0; t < num_threads; ++t) {
+        threads.emplace_back(work);
+    }
+    for (auto &t : threads) {
+        t.join();
+    }
+
+    CHECK(violations == 0);
+    CHECK(value_count == num_threads * iterations);
+    CHECK(region::detail::waiters_<name> == 0);
+    CHECK(region::detail::queue_<name>.empty());
+}
+
+// Enqueues and cancellations colliding from four threads while the region
+// is held (by this thread) for the whole storm. No hand-off can occur, so
+// each op is completed only by its own thread's request_stop; what is
+// stressed is the shared count/queue bookkeeping: concurrent enqueues,
+// head and mid-queue unlinks, and the atomicity of dequeue-and-give-back.
+// Any lost reservation shows up in the final count.
+TEST_CASE("concurrent enqueue/cancel under a held region", "[region]") {
+    constexpr auto name = stdx::ct_string{"stress-cancel"};
+    constexpr auto num_threads = 4;
+    constexpr auto iterations = 500;
+
+    auto hold_op = async::connect(
+        async::just() | region::detail::acquire<name>(), universal_receiver{});
+    async::start(hold_op);
+    CHECK(region::detail::waiters_<name> == 1);
+
+    std::atomic<int> body_runs{};
+    std::atomic<int> stop_count{};
+
+    auto const work = [&] {
+        for (auto i = 0; i < iterations; ++i) {
+            async::inplace_stop_source src_a{};
+            async::inplace_stop_source src_b{};
+            std::atomic<bool> done_a{false};
+            std::atomic<bool> done_b{false};
+
+            auto body = async::just_result_of([&] { ++body_runs; });
+            auto op_a = async::connect(
+                async::just() | region::within<name>(body),
+                stress_receiver{src_a.get_token(), std::addressof(stop_count),
+                                std::addressof(done_a)});
+            auto op_b = async::connect(
+                async::just() | region::within<name>(body),
+                stress_receiver{src_b.get_token(), std::addressof(stop_count),
+                                std::addressof(done_b)});
+            async::start(op_a);
+            async::start(op_b);
+            std::this_thread::yield();
+            // Cancel in reverse order so unlinking from the middle of the
+            // FIFO (not just its head) is exercised.
+            src_b.request_stop();
+            src_a.request_stop();
+            while (not done_a.load() or not done_b.load()) {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (auto t = 0; t < num_threads; ++t) {
+        threads.emplace_back(work);
+    }
+    for (auto &t : threads) {
+        t.join();
+    }
+
+    // Every op was cancelled while queued: none ran, none acquired, and
+    // every reservation was given back — only the holder remains.
+    CHECK(body_runs == 0);
+    CHECK(stop_count == 2 * num_threads * iterations);
+    CHECK(region::detail::waiters_<name> == 1);
+    CHECK(region::detail::queue_<name>.empty());
+
+    CHECK((async::just() | region::detail::release<name>() | async::sync_wait())
+              .has_value());
     CHECK(region::detail::waiters_<name> == 0);
 }
