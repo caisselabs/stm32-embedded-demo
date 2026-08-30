@@ -145,13 +145,13 @@ template <typename PeripheralGroup> struct interrupt_hal {
     // Given a field type (e.g. an enable_field_t from the interrupt
     // config), resolve it to a groov path.
     template <typename Field>
-    CONSTEVAL static auto get_field() -> groov::pathlike auto {
+    consteval static auto get_field() -> groov::pathlike auto {
         return groov::make_path<Field::value>();
     }
 
     // Return the parent register path for a given field.
     template <typename Field>
-    CONSTEVAL static auto get_register() -> groov::pathlike auto {
+    consteval static auto get_register() -> groov::pathlike auto {
         return groov::parent(get_field<Field>());
     }
     // The underlying data type of the register (e.g. std::uint32_t).

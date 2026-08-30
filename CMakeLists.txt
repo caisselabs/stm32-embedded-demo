@@ -16,11 +16,11 @@ include(cmake/get_cpm.cmake)
 cpmaddpackage("gh:intel/cicd-repo-infrastructure#dev")
 
 add_versioned_package("gh:intel/cpp-baremetal-concurrency#b8a486a")
-add_versioned_package("gh:intel/cpp-std-extensions#0f91ae4")
-add_versioned_package("gh:intel/cpp-baremetal-senders-and-receivers#3e3c8aa")
+add_versioned_package("gh:intel/cpp-std-extensions#0006b57")
+add_versioned_package("gh:intel/cpp-baremetal-senders-and-receivers#ffb0a7a")
 add_versioned_package("gh:intel/generic-register-operation-optimizer#2e45cc2")
 add_versioned_package("gh:caisselabs/stm32-groov#6769da8")
-add_versioned_package("gh:intel/compile-time-init-build#f9b4cc5")
+add_versioned_package("gh:intel/compile-time-init-build#7d269d4")
 
 
 
