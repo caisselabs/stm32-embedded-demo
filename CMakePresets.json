@@ -13,32 +13,14 @@
       "binaryDir": "${sourceDir}/build"
     },
     {
-      "name": "default",
-      "inherits": "base",
-      "description": "Build using Clang with libstdc++",
-      "toolchainFile": "${sourceDir}/toolchains/clang.cmake"
-    },
-    {
-      "name": "clang",
-      "inherits": "default"
-    },
-    {
-      "name": "clang-libstdc++",
-      "inherits": "default"
-    },
-    {
-      "name": "clang-libc++",
-      "inherits": "default",
-      "description": "Build using Clang with libc++",
-      "environment": {
-        "CXX_STDLIB": "libc++"
-      }
-    },
-    {
       "name": "gcc",
       "inherits": "base",
       "description": "Build using GCC",
       "toolchainFile": "${sourceDir}/toolchains/gcc-arm.cmake"
+    },
+    {
+      "name": "default",
+      "inherits": "gcc"
     }
   ]
 }

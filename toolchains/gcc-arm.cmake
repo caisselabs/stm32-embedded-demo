@@ -4,8 +4,7 @@ set( CMAKE_SYSTEM_PROCESSOR  arm )
 
 # Setup the path where the toolchain is located
 
-#set( TC_PATH "/home/mjcaisse/tools/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi/bin/")
-set( TC_PATH "/home/mjcaisse/tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin/")
+set( TC_PATH "/home/mjcaisse/tools/arm-gnu-toolchain-15.3.rel1-x86_64-arm-none-eabi/bin/")
 
 
 # The toolchain prefix for all toolchain executables
@@ -37,7 +36,10 @@ SET(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 SET(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 
 
-# setup the common CMAKE flags for both the C and C++ compilers
+# setup the common CMAKE flags for both the C and C++ compilers.
+# CMake includes this file once per language while detecting the compilers, all
+# in the same scope, so start from empty or the flags accumulate.
+set( COMMON_FLAGS "" )
 set( COMMON_FLAGS "${COMMON_FLAGS} -mthumb -mcpu=cortex-m4" )
 set( COMMON_FLAGS "${COMMON_FLAGS} -mfloat-abi=hard" )
 set( COMMON_FLAGS "${COMMON_FLAGS} -mfpu=fpv4-sp-d16" )
@@ -45,9 +47,16 @@ set( COMMON_FLAGS "${COMMON_FLAGS} -mtune=cortex-m4" )
 set( COMMON_FLAGS "${COMMON_FLAGS} -ffunction-sections" )
 set( COMMON_FLAGS "${COMMON_FLAGS} -fdata-sections" )
 # temporary here
-#set( COMMON_FLAGS "${COMMON_FLAGS} -g -Os -flto" )
-set( COMMON_FLAGS "${COMMON_FLAGS} -Os -flto" )
+#set( COMMON_FLAGS "${COMMON_FLAGS} -g -Os" )
+set( COMMON_FLAGS "${COMMON_FLAGS} -Os" )
 set( COMMON_FLAGS "${COMMON_FLAGS} -D__NO_SYSTEM_INIT" )
+
+# LTO is enabled via the IPO property rather than by putting -flto directly in
+# CMAKE_<LANG>_FLAGS. CMake reuses CMAKE_<LANG>_FLAGS when it compiles its
+# compiler-identification source, and gcc's LTO objects mangle the version
+# string CMake scans for (gcc 15.3.1 is read back as "15.31"), which makes the
+# C language setup fail. Setting IPO applies -flto after that detection step.
+set( CMAKE_INTERPROCEDURAL_OPTIMIZATION ON )
 
 # Set the CMAKE C flags (which should also be used by the assembler!
 set( CMAKE_C_FLAGS "${COMMON_FLAGS}")
