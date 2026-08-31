@@ -72,23 +72,61 @@ entries appear in the catalogue for free.
 
 ** Decoding
 
-Dump the buffer from GDB and run it through CIB's decoder:
+Dump the whole buffer --- header included --- from GDB, flatten it, and run it
+through CIB's decoder:
 
 #+begin_src sh
 # in gdb, after halting the target
-(gdb) p app_log::buffer.total_words
-(gdb) dump binary value log.bin app_log::buffer.words
+(gdb) dump binary value log.bin app_log::buffer
 
 # on the host
+python3 tools/unwrap_log.py --input log.bin --output ordered.bin
 python3 <cib>/python/cib/log_decode.py \
-    --input log.bin --json build/log_strings.json
+    --input ordered.bin --json build/log_strings.json
 #+end_src
 
 ~<cib>~ is the CPM checkout, ~build/_deps/compile-time-init-build-src~. The
 decoder handles Short32, Short64 and Catalog messages.
 
-Note that the buffer wraps: if ~total_words > capacity~ the oldest words have
-been overwritten and the stream no longer starts at a message boundary.
+*** Why not dump ~app_log::buffer.words~ directly
+
+The decoder reads packets back-to-back: no framing, no end marker, no length
+outside the packets themselves. That makes the raw ring unusable in two ways,
+and ~tools/unwrap_log.py~ exists to fix both.
+
+1. *Trailing zeros abort the decode.* A dump of the ring includes every
+   unwritten word. The decoder takes the first zero word's low nibble as a
+   message type and raises ~Unknown message type: 0~. The real entries print
+   first, so this looks survivable, but it exits non-zero and truncates
+   anything downstream.
+2. *A wrapped ring is out of order.* Once ~total_words > capacity~ the oldest
+   surviving word sits at index ~total_words % capacity~. Every word is still
+   a valid packet, so this does /not/ error --- it silently prints the log with
+   a seam in the middle, which is the worse failure.
+
+~unwrap_log.py~ reads ~capacity~ and ~total_words~ out of the header, emits
+exactly the live words oldest-first, and reports on stderr how many were
+overwritten before the dump was taken. That last number is the reason to dump
+the header rather than slicing the array in GDB --- it is the only indication
+that packets were lost.
+
+The ~magic~ field ('CIBL') is checked, so dumping ~app_log::buffer.words~ by
+mistake is reported rather than silently mis-parsed.
+
+Slicing in GDB works too if the header is not wanted, but note that ~words~ is
+a ~std::array~ and no pretty-printer is loaded, so it has to go through the
+underlying member:
+
+#+begin_src sh
+(gdb) dump binary value log.bin app_log::buffer.words._M_elems[0]@app_log::buffer.total_words
+#+end_src
+
+*** Truncated final packet
+
+The ring is written a word at a time, so halting the target midway through a
+multi-word packet leaves a partial one at the end and the decoder runs off the
+end of the file. Not reachable while every call site is a single-word Short32,
+but it becomes possible as soon as something logs with runtime arguments.
 
 ** Version logging
 
