@@ -17,6 +17,12 @@
 #include <logging/log_config.hpp>
 #include <project.hpp>
 
+extern "C" {
+// called by startup code prior to main
+void SystemInit() {
+}
+}
+
 using nexus_t = cib::nexus<project_nexus>;
 constexpr nexus_t nexus{};
 constexpr auto interrupt_manager =
