@@ -36,6 +36,9 @@ if(NOT CMAKE_CROSSCOMPILING)
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/scratch/CMakeLists.txt)
     add_subdirectory(src/scratch)
   endif()
+
+  # tests for the host-side debugging scripts (tools/unwrap_log.py)
+  add_subdirectory(tools)
 endif()
 
 # --------------------------------------------------------------------------

@@ -79,14 +79,32 @@ through CIB's decoder:
 # in gdb, after halting the target
 (gdb) dump binary value log.bin app_log::buffer
 
-# on the host
-python3 tools/unwrap_log.py --input log.bin --output ordered.bin
-python3 <cib>/python/cib/log_decode.py \
-    --input ordered.bin --json build/log_strings.json
+# on the host, in one line
+python3 tools/unwrap_log.py --input log.bin | \
+    python3 <cib>/python/cib/log_decode.py \
+        --input /dev/stdin --json build/log_strings.json
 #+end_src
 
 ~<cib>~ is the CPM checkout, ~build/_deps/compile-time-init-build-src~. The
 decoder handles Short32, Short64 and Catalog messages.
+
+~unwrap_log.py~ writes the packet stream to stdout by default and keeps its
+progress line on stderr, so the two chain directly. ~log_decode.py~ takes a
+filename rather than reading stdin, hence ~/dev/stdin~; bash process
+substitution works equally well if that reads better:
+
+#+begin_src sh
+python3 <cib>/python/cib/log_decode.py --json build/log_strings.json \
+    --input <(python3 tools/unwrap_log.py --input log.bin)
+#+end_src
+
+Pass ~--output ordered.bin~ to keep the flattened stream around instead.
+
+One wrinkle with the pipe form: the shell reports only the last command's
+status, so a failure in ~unwrap_log.py~ (bad magic, truncated dump) still
+exits 0 --- the decoder simply sees an empty stream. The diagnostic is on
+stderr either way, but use ~set -o pipefail~ if the exit code is being
+checked.
 
 *** Why not dump ~app_log::buffer.words~ directly
 
@@ -120,6 +138,36 @@ underlying member:
 #+begin_src sh
 (gdb) dump binary value log.bin app_log::buffer.words._M_elems[0]@app_log::buffer.total_words
 #+end_src
+
+*** Tests
+
+~tools/test/test_unwrap_log.py~ covers ~unwrap_log.py~ --- ring-model
+equivalence across capacities and wrap points, the CLI contract the pipeline
+relies on (packets on stdout, progress on stderr, non-zero exit on a bad
+dump), and end-to-end runs through the real ~log_decode.py~ that pin both
+failure modes described above.
+
+~tools/CMakeLists.txt~ registers them with ~add_unit_test(... PYTEST ...)~, so
+they are part of the normal test run in a host build:
+
+#+begin_src sh
+cmake -B build -G Ninja
+ninja -C build unit_tests      # C++ and Python tests together
+ninja -C build python_tests    # just these
+#+end_src
+
+The infrastructure runs them with ~pytest -n auto~, so pytest and
+pytest-xdist have to be installed; ~tools/CMakeLists.txt~ announces and skips
+them if pytest is missing rather than breaking the default build. The test
+file is plain ~unittest~, so it also runs on its own with no pytest at all:
+
+#+begin_src sh
+python3 -m unittest discover -s tools/test -v
+#+end_src
+
+The end-to-end cases need ~log_decode.py~ and so skip themselves until the
+project has been configured once. Set ~BUILD_DIR~ if the build tree is
+somewhere other than ~build/~ or ~build-host/~.
 
 *** Truncated final packet
 
