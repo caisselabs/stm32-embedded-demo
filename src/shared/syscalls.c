@@ -31,31 +31,31 @@
 #include <errno.h>
 
 int _close(int file) {
-    (void)file;
-    errno = ENOSYS;
-    return -1;
+   (void)file;
+   errno = ENOSYS;
+   return -1;
 }
 
 int _lseek(int file, int ptr, int dir) {
-    (void)file;
-    (void)ptr;
-    (void)dir;
-    errno = ENOSYS;
-    return -1;
+   (void)file;
+   (void)ptr;
+   (void)dir;
+   errno = ENOSYS;
+   return -1;
 }
 
 int _read(int file, char *ptr, int len) {
-    (void)file;
-    (void)ptr;
-    (void)len;
-    errno = ENOSYS;
-    return -1;
+   (void)file;
+   (void)ptr;
+   (void)len;
+   errno = ENOSYS;
+   return -1;
 }
 
 int _write(int file, char *ptr, int len) {
-    (void)file;
-    (void)ptr;
-    (void)len;
-    errno = ENOSYS;
-    return -1;
+   (void)file;
+   (void)ptr;
+   (void)len;
+   errno = ENOSYS;
+   return -1;
 }

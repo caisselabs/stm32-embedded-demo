@@ -31,9 +31,12 @@ reports on stderr how many were overwritten before the dump was taken.
 Usage:
     (gdb) dump binary value log.bin app_log::buffer
 
-    python3 tools/unwrap_log.py --input log.bin --output ordered.bin
-    python3 <cib>/python/cib/log_decode.py \
-        --input ordered.bin --json build/log_strings.json
+    python3 tools/unwrap_log.py --input log.bin | \
+        python3 <cib>/python/cib/log_decode.py \
+            --input /dev/stdin --json build/log_strings.json
+
+log_decode.py takes a filename rather than reading stdin, hence /dev/stdin.
+Pass --output to write a file instead.
 """
 
 import argparse
@@ -85,8 +88,11 @@ def main():
     )
     parser.add_argument(
         "--output",
-        required=True,
-        help="Output filename: packet stream for log_decode.py.",
+        default="-",
+        help=(
+            "Output filename: packet stream for log_decode.py. "
+            "Defaults to '-' (stdout), for piping into log_decode.py."
+        ),
     )
     args = parser.parse_args()
 
@@ -98,11 +104,19 @@ def main():
     except ValueError as e:
         sys.exit(f"{args.input}: {e}")
 
-    with open(args.output, "wb") as f:
-        f.write(struct.pack(f"<{len(words)}I", *words))
+    packed = struct.pack(f"<{len(words)}I", *words)
+    if args.output == "-":
+        sys.stdout.buffer.write(packed)
+        sys.stdout.buffer.flush()
+        where = "stdout"
+    else:
+        with open(args.output, "wb") as f:
+            f.write(packed)
+        where = args.output
 
+    # Progress goes to stderr so that stdout stays a clean packet stream.
     note = f", {lost} overwritten before the dump" if lost else ""
-    print(f"{len(words)} words written to {args.output}{note}", file=sys.stderr)
+    print(f"{len(words)} words written to {where}{note}", file=sys.stderr)
 
 
 if __name__ == "__main__":

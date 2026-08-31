@@ -13,17 +13,18 @@
 
 namespace hal {
 struct concurrency_policy {
-    template <typename = void, std::invocable F, std::predicate... Pred>
-    static auto call_in_critical_section(F &&f, Pred &&...pred)
-        -> decltype(std::forward<F>(f)()) {
-        while (true) {
-            [[maybe_unused]] hal::disable_interrupts_lock lock{};
-            if ((... and pred())) {
-                return std::forward<F>(f)();
-            }
-        }
-    }
+   template <typename = void, std::invocable F, std::predicate... Pred>
+   static auto call_in_critical_section(F &&f, Pred &&...pred)
+       -> decltype(std::forward<F>(f)()) {
+      while (true) {
+         [[maybe_unused]] hal::disable_interrupts_lock lock{};
+         if ((... and pred())) {
+            return std::forward<F>(f)();
+         }
+      }
+   }
 };
 } // namespace hal
 
-template <> inline auto conc::injected_policy<> = hal::concurrency_policy{};
+template <>
+inline auto conc::injected_policy<> = hal::concurrency_policy{};

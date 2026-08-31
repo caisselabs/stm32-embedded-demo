@@ -1,0 +1,331 @@
+name: Unit Tests
+permissions: read-all
+
+on:
+  workflow_dispatch:
+  merge_group:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  CMAKE_GENERATOR: Ninja
+  DEFAULT_CXX_STANDARD: 20
+  DEFAULT_LLVM_VERSION: 21
+  DEFAULT_GCC_VERSION: 14
+  MULL_LLVM_MAJOR_VERSION: 19
+  MULL_LLVM_VERSION: 19.1.1
+  MULL_VERSION: 0.27.1
+
+concurrency:
+  group: ${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test_24:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [clang, gcc]
+        version: [12, 13, 14, 19, 20, 21]
+        cxx_standard: [20]
+        stdlib: [libstdc++, libc++]
+        build_type: [Debug]
+        include:
+          - compiler: clang
+            cc: "clang"
+            cxx: "clang++"
+            cxx_flags: "-stdlib=libstdc++"
+          - version: 21
+            compiler: clang
+            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 21
+            toolchain_root: "/usr/lib/llvm-21"
+          - version: 21
+            compiler: clang
+            stdlib: libc++
+            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 21 && sudo apt install -y libc++-21-dev libc++abi-21-dev
+            cxx_flags: "-stdlib=libc++"
+          - version: 20
+            compiler: clang
+            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 20
+            toolchain_root: "/usr/lib/llvm-20"
+          - version: 20
+            compiler: clang
+            stdlib: libc++
+            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 20 && sudo apt install -y libc++-20-dev libc++abi-20-dev
+            cxx_flags: "-stdlib=libc++"
+          - version: 19
+            compiler: clang
+            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 19
+            toolchain_root: "/usr/lib/llvm-19"
+          - version: 19
+            compiler: clang
+            stdlib: libc++
+            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 19 && sudo apt install -y libc++-19-dev libc++abi-19-dev
+            cxx_flags: "-stdlib=libc++"
+          - compiler: gcc
+            toolchain_root: "/usr"
+            cxx_flags: ""
+          - version: 14
+            compiler: gcc
+            install: sudo apt update && sudo apt install -y gcc-14 g++-14
+            cc: "gcc-14"
+            cxx: "g++-14"
+          - version: 13
+            compiler: gcc
+            install: sudo apt update && sudo apt install -y gcc-13 g++-13
+            cc: "gcc-13"
+            cxx: "g++-13"
+          - version: 12
+            compiler: gcc
+            install: sudo apt update && sudo apt install -y gcc-12 g++-12
+            cc: "gcc-12"
+            cxx: "g++-12"
+            cxx_flags: ""
+        exclude:
+          - compiler: gcc
+            version: 21
+          - compiler: gcc
+            version: 20
+          - compiler: gcc
+            version: 19
+          - compiler: clang
+            version: 14
+          - compiler: clang
+            version: 13
+          - compiler: clang
+            version: 12
+          - compiler: gcc
+            stdlib: libc++
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install build tools
+        run: |
+          ${{ matrix.install }}
+          sudo apt install -y ninja-build
+          # add_unit_test(... PYTEST ...) runs the tools/ tests with
+          # `pytest -n auto`, so xdist is needed as well as pytest itself.
+          sudo apt install -y python3-pytest python3-pytest-xdist
+
+      - name: Restore CPM cache
+        env:
+          cache-name: cpm-cache-0
+        id: cpm-cache-restore
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: |
+            ${{runner.os}}-${{env.cache-name}}-
+
+      - name: Configure CMake
+        env:
+          CC: ${{matrix.toolchain_root}}/bin/${{matrix.cc}}
+          CXX: ${{matrix.toolchain_root}}/bin/${{matrix.cxx}}
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_CXX_STANDARD=${{matrix.cxx_standard}} -DCMAKE_CXX_FLAGS_INIT=${{matrix.cxx_flags}} -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DCPM_SOURCE_CACHE=~/cpm-cache
+
+      - name: Save CPM cache
+        env:
+          cache-name: cpm-cache-0
+        if: steps.cpm-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+
+      - name: Build Unit Tests
+        run: cmake --build ${{github.workspace}}/build --config ${{matrix.build_type}} -v -t build_unit_tests
+
+      - name: Test
+        working-directory: ${{github.workspace}}/build
+        run: ctest --output-on-failure -j $(nproc) -C ${{matrix.build_type}}
+
+  quality_checks_pass:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{github.base_ref}}
+
+      - name: Extract target branch SHA
+        run: echo "branch=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+        id: target_branch
+
+      - name: Checkout PR branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install build tools
+        run: |
+          sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh ${{env.DEFAULT_LLVM_VERSION}}
+          sudo apt install -y pipx ninja-build clang-tidy-${{env.DEFAULT_LLVM_VERSION}} clang-format-${{env.DEFAULT_LLVM_VERSION}}
+
+      - name: Install cmake-format
+        run: |
+          pipx install cmakelang
+          pipx inject cmakelang pyyaml
+          echo "/opt/pipx_bin" >> $GITHUB_PATH
+
+      - name: Restore CPM cache
+        env:
+          cache-name: cpm-cache-0
+        id: cpm-cache-restore
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: |
+            ${{runner.os}}-${{env.cache-name}}-
+
+      - name: Configure CMake
+        env:
+          CC: "/usr/lib/llvm-${{env.DEFAULT_LLVM_VERSION}}/bin/clang"
+          CXX: "/usr/lib/llvm-${{env.DEFAULT_LLVM_VERSION}}/bin/clang++"
+          PR_TARGET_BRANCH: ${{ steps.target_branch.outputs.branch }}
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_CXX_STANDARD=${{env.DEFAULT_CXX_STANDARD}} -DCPM_SOURCE_CACHE=~/cpm-cache
+
+      - name: Save CPM cache
+        env:
+          cache-name: cpm-cache-0
+        if: steps.cpm-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+
+      - name: Run quality checks
+        run: cmake --build ${{github.workspace}}/build -t ci-quality
+
+  sanitize:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [undefined, address, thread]
+        compiler: [clang, gcc]
+        include:
+          - compiler: clang
+            cc: "clang"
+            cxx: "clang++"
+            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 21
+            toolchain_root: "/usr/lib/llvm-21"
+          - compiler: gcc
+            cc: "gcc-14"
+            cxx: "g++-14"
+            install: sudo apt update && sudo apt install -y gcc-14 g++-14
+            toolchain_root: "/usr"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install build tools
+        run: |
+          ${{ matrix.install }}
+          sudo apt install -y ninja-build
+          # add_unit_test(... PYTEST ...) runs the tools/ tests with
+          # `pytest -n auto`, so xdist is needed as well as pytest itself.
+          sudo apt install -y python3-pytest python3-pytest-xdist
+
+      - name: Restore CPM cache
+        env:
+          cache-name: cpm-cache-0
+        id: cpm-cache-restore
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: |
+            ${{runner.os}}-${{env.cache-name}}-
+
+      - name: Configure CMake
+        env:
+          CC: ${{matrix.toolchain_root}}/bin/${{matrix.cc}}
+          CXX: ${{matrix.toolchain_root}}/bin/${{matrix.cxx}}
+          SANITIZERS: ${{matrix.sanitizer}}
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_CXX_STANDARD=${{env.DEFAULT_CXX_STANDARD}} -DCPM_SOURCE_CACHE=~/cpm-cache
+
+      - name: Save CPM cache
+        env:
+          cache-name: cpm-cache-0
+        if: steps.cpm-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+
+      # https://github.com/actions/runner-images/issues/9524
+      - name: Fix kernel mmap rnd bits
+        # Asan in llvm 14 provided in ubuntu 22.04 is incompatible with
+        # high-entropy ASLR in much newer kernels that GitHub runners are
+        # using leading to random crashes: https://reviews.llvm.org/D148280
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Build Unit Tests
+        run: cmake --build ${{github.workspace}}/build -t unit_tests
+
+  mutate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install build tools
+        run: |
+          sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh ${{env.MULL_LLVM_MAJOR_VERSION}}
+          sudo apt install -y ninja-build
+
+      - name: Install mull
+        env:
+          mull-pkg: Mull-${{env.MULL_LLVM_MAJOR_VERSION}}-${{env.MULL_VERSION}}-LLVM-${{env.MULL_LLVM_VERSION}}-ubuntu-amd64-24.04.deb
+        run: |
+          MULL_DEB="$(mktemp)"
+          wget -O "$MULL_DEB" https://github.com/mull-project/mull/releases/download/${{env.MULL_VERSION}}/${{env.mull-pkg}}
+          sudo dpkg -i "$MULL_DEB"
+
+      - name: Checkout PR branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Restore CPM cache
+        env:
+          cache-name: cpm-cache-0
+        id: cpm-cache-restore
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: |
+            ${{runner.os}}-${{env.cache-name}}-
+
+      - name: Configure CMake
+        env:
+          CC: "/usr/lib/llvm-${{env.MULL_LLVM_MAJOR_VERSION}}/bin/clang"
+          CXX: "/usr/lib/llvm-${{env.MULL_LLVM_MAJOR_VERSION}}/bin/clang++"
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_CXX_STANDARD=${{env.DEFAULT_CXX_STANDARD}} -DCPM_SOURCE_CACHE=~/cpm-cache
+
+      - name: Save CPM cache
+        env:
+          cache-name: cpm-cache-0
+        if: steps.cpm-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+
+      - name: Build app and run mull tests
+        run: cmake --build ${{github.workspace}}/build -t mull_tests
+
+  merge_ok:
+    runs-on: ubuntu-24.04
+    needs: [build_and_test_24, sanitize]
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Enable merge
+        if: >-
+          ${{
+               contains(needs.*.result, 'failure')
+            || contains(needs.*.result, 'cancelled')
+            || contains(needs.*.result, 'skipped')
+          }}
+        run: exit 1

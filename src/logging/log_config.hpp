@@ -30,7 +30,7 @@
 namespace app_log {
 
 // Number of 32-bit words retained by the RAM log buffer.
-inline constexpr std::size_t buffer_capacity = 256;
+constexpr inline std::size_t buffer_capacity = 256;
 
 // The destination for encoded packets.
 //
@@ -43,29 +43,29 @@ inline constexpr std::size_t buffer_capacity = 256;
 // Replace `log_destination::operator()` with a real transport (UART, SWO/ITM,
 // ...) when one exists; nothing else in the logging setup has to change.
 struct buffer_t {
-    // 'C' 'I' 'B' 'L' -- a marker to find the buffer in a raw memory dump.
-    std::uint32_t magic{0x4342494cU};
-    std::uint32_t capacity{buffer_capacity};
-    // Monotonically increasing count of words written. The oldest retained
-    // word is at index `total_words - capacity` (modulo `capacity`) once
-    // `total_words` exceeds `capacity`.
-    std::uint32_t total_words{};
-    std::array<std::uint32_t, buffer_capacity> words{};
+   // 'C' 'I' 'B' 'L' -- a marker to find the buffer in a raw memory dump.
+   std::uint32_t magic{0x4342494cU};
+   std::uint32_t capacity{buffer_capacity};
+   // Monotonically increasing count of words written. The oldest retained
+   // word is at index `total_words - capacity` (modulo `capacity`) once
+   // `total_words` exceeds `capacity`.
+   std::uint32_t total_words{};
+   std::array<std::uint32_t, buffer_capacity> words{};
 };
 
 inline buffer_t buffer{};
 
 struct log_destination {
-    // The call operator is a template, so it is instantiated once per packet
-    // size. `logging::binary::log_writer` wraps the call in a critical section
-    // (see hal::concurrency_policy), so logging from an ISR is safe.
-    template <std::size_t N>
-    auto operator()(stdx::span<std::uint32_t const, N> packet) const -> void {
-        for (auto const word : packet) {
-            buffer.words[buffer.total_words % buffer_capacity] = word;
-            ++buffer.total_words;
-        }
-    }
+   // The call operator is a template, so it is instantiated once per packet
+   // size. `logging::binary::log_writer` wraps the call in a critical section
+   // (see hal::concurrency_policy), so logging from an ISR is safe.
+   template <std::size_t N>
+   auto operator()(stdx::span<std::uint32_t const, N> packet) const -> void {
+      for (auto const word : packet) {
+         buffer.words[buffer.total_words % buffer_capacity] = word;
+         ++buffer.total_words;
+      }
+   }
 };
 
 // Reported by CIB_LOG_VERSION(). `build_id` is what a decoder keys on to pick
@@ -81,14 +81,14 @@ struct log_destination {
 // Short64 and Catalog messages only. That is why the demo does not call it on
 // the boot path.
 struct version_config {
-    constexpr static auto build_id = std::uint64_t{0x0001'0000};
-    constexpr static auto version_string = stdx::ct_string{""};
+   constexpr static auto build_id = std::uint64_t{0x0001'0000};
+   constexpr static auto version_string = stdx::ct_string{""};
 };
 
 } // namespace app_log
 
 template <>
-inline auto logging::config<> =
-    logging::binary::config{app_log::log_destination{}};
+inline auto logging::config<> = logging::binary::config{app_log::log_destination{}};
 
-template <> inline auto version::config<> = app_log::version_config{};
+template <>
+inline auto version::config<> = app_log::version_config{};

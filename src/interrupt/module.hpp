@@ -10,9 +10,11 @@
 
 namespace interrupt {
 struct module {
-    constexpr static auto config = cib::config( //
-        cib::exports<                           //
-            isr_dma1_ch2                        //
-            >);
+   constexpr static auto config = cib::config( //
+       cib::exports<                           //
+           isr_i2c1_ev,                        //
+           isr_i2c1_er,                        //
+           isr_dma1_ch2                        //
+           >);
 };
 } // namespace interrupt
