@@ -335,8 +335,7 @@ jobs:
         env:
           CC: "/usr/lib/llvm-${{env.MULL_LLVM_MAJOR_VERSION}}/bin/clang"
           CXX: "/usr/lib/llvm-${{env.MULL_LLVM_MAJOR_VERSION}}/bin/clang++"
-        working-directory: ${{github.workspace}}/test/application
-        run: cmake -Bbuild -DCPM_SOURCE_CACHE=~/cpm-cache
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_CXX_STANDARD=${{env.DEFAULT_CXX_STANDARD}} -DCPM_SOURCE_CACHE=~/cpm-cache
 
       - name: Save CPM cache
         env:

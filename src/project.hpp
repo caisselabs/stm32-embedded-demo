@@ -9,5 +9,5 @@
 #include <interrupt/module.hpp>
 
 struct project_nexus {
-    constexpr static auto config = cib::components<interrupt::module>;
+   constexpr static auto config = cib::components<interrupt::module>;
 };

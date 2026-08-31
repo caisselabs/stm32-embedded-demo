@@ -315,7 +315,7 @@ constexpr auto op_state<Name, Rcvr>::start() & -> void {
       if (this->cancelled()) {
          return action::stopped;
       }
-      if (waiters_<Name> ++ == 0) {
+      if (waiters_<Name> ++== 0) {
          // the region was released while we were arming cancellation
          return action::value;
       }
@@ -362,8 +362,8 @@ struct release_receiver {
    using is_receiver = void;
    [[no_unique_address]] Rcvr rcvr;
 
-   [[nodiscard]] constexpr auto
-   query(async::get_env_t) const -> async::forwarding_env<async::env_of_t<Rcvr>> {
+   [[nodiscard]] constexpr auto query(async::get_env_t) const
+       -> async::forwarding_env<async::env_of_t<Rcvr>> {
       return async::forward_env_of(rcvr);
    }
 
@@ -389,8 +389,8 @@ struct release_sender {
    [[no_unique_address]] S s;
 
    template <typename Env>
-   [[nodiscard]] constexpr static auto
-   get_completion_signatures(Env const &) -> async::completion_signatures_of_t<S, Env> {
+   [[nodiscard]] constexpr static auto get_completion_signatures(Env const &)
+       -> async::completion_signatures_of_t<S, Env> {
       return {};
    }
 

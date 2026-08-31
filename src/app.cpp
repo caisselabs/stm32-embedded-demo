@@ -19,37 +19,35 @@
 
 extern "C" {
 // called by startup code prior to main
-void SystemInit() {
-}
+void SystemInit() {}
 }
 
 using nexus_t = cib::nexus<project_nexus>;
 constexpr nexus_t nexus{};
 constexpr auto interrupt_manager =
-    interrupt::manager<interrupt::config,
-                       hal::interrupt_hal<interrupt::register_group>,
+    interrupt::manager<interrupt::config, hal::interrupt_hal<interrupt::register_group>,
                        nexus_t>{};
 
 [[noreturn]] auto app_run() -> void {
-    // Scopes every log below to the "app" module ID rather than the default.
-    CIB_LOG_MODULE("app");
+   // Scopes every log below to the "app" module ID rather than the default.
+   CIB_LOG_MODULE("app");
 
-    CIB_INFO("Booting");
+   CIB_INFO("Booting");
 
-    nexus.init();
-    flow::run<base_flow::pre_init>();
+   nexus.init();
+   flow::run<base_flow::pre_init>();
 
-    interrupt_manager.init();
+   interrupt_manager.init();
 
-    flow::run<base_flow::init>();
+   flow::run<base_flow::init>();
 
-    flow::run<base_flow::start>();
+   flow::run<base_flow::start>();
 
-    hal::enable_interrupts();
+   hal::enable_interrupts();
 
-    CIB_INFO("Entering main loop");
+   CIB_INFO("Entering main loop");
 
-    while (true) {
-        flow::run<base_flow::loop>();
-    }
+   while (true) {
+      flow::run<base_flow::loop>();
+   }
 }

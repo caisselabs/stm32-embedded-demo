@@ -7,6 +7,7 @@
 #pragma once
 #include <flow/service.hpp>
 
+// clang-format off
 namespace interrupt {
 
 // STM32L432 interrupt flow services
@@ -93,3 +94,4 @@ struct isr_i2c4_ev          : flow::service<"isr_i2c4_ev"> {};          // IRQ 8
 struct isr_i2c4_er          : flow::service<"isr_i2c4_er"> {};          // IRQ 84
 
 } // namespace interrupt
+// clang-format on
