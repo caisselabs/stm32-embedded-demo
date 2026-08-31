@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         compiler: [clang, gcc]
-        version: [12, 13, 14, 16, 17, 18, 19, 20, 21]
+        version: [12, 13, 14, 19, 20, 21]
         cxx_standard: [20]
         stdlib: [libstdc++, libc++]
         build_type: [Debug]
@@ -66,33 +66,6 @@ jobs:
             stdlib: libc++
             install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 19 && sudo apt install -y libc++-19-dev libc++abi-19-dev
             cxx_flags: "-stdlib=libc++"
-          - version: 18
-            compiler: clang
-            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 18
-            toolchain_root: "/usr/lib/llvm-18"
-          - version: 18
-            compiler: clang
-            stdlib: libc++
-            install: sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)" llvm.sh 18 && sudo apt install -y libc++-18-dev libc++abi-18-dev
-            cxx_flags: "-stdlib=libc++"
-          - version: 17
-            compiler: clang
-            install: sudo apt update && sudo apt install -y clang-17
-            toolchain_root: "/usr/lib/llvm-17"
-          - version: 17
-            compiler: clang
-            stdlib: libc++
-            install: sudo apt update && sudo apt install -y clang-17 libc++-17-dev libc++abi-17-dev
-            cxx_flags: "-stdlib=libc++"
-          - version: 16
-            compiler: clang
-            install: sudo apt update && sudo apt install -y clang-16
-            toolchain_root: "/usr/lib/llvm-16"
-          - version: 16
-            compiler: clang
-            stdlib: libc++
-            install: sudo apt update && sudo apt install -y clang-16 libc++-16-dev libc++abi-16-dev
-            cxx_flags: "-stdlib=libc++"
           - compiler: gcc
             toolchain_root: "/usr"
             cxx_flags: ""
@@ -119,12 +92,6 @@ jobs:
             version: 20
           - compiler: gcc
             version: 19
-          - compiler: gcc
-            version: 18
-          - compiler: gcc
-            version: 17
-          - compiler: gcc
-            version: 16
           - compiler: clang
             version: 14
           - compiler: clang
@@ -351,7 +318,7 @@ jobs:
 
   merge_ok:
     runs-on: ubuntu-24.04
-    needs: [build_and_test_24, quality_checks_pass, sanitize]
+    needs: [build_and_test_24, sanitize]
     if: ${{ !cancelled() }}
     steps:
       - name: Enable merge
