@@ -39,6 +39,22 @@ if(NOT CMAKE_CROSSCOMPILING)
 endif()
 
 # --------------------------------------------------------------------------
+# Build settings for the demo application and its libraries.
+#
+# The toolchain file puts -Os in CMAKE_<LANG>_FLAGS, which applies to every
+# target in the build -- including the fetched dependencies. Target options are
+# placed after CMAKE_<LANG>_FLAGS on the command line and gcc honours the last
+# -O it sees, so linking this interface library overrides the global -Os for
+# the demo targets only.
+#
+# The same flags are repeated at link time: LTO defers code generation to the
+# link step, and the plugin takes its optimization level and debug settings
+# from the link command line.
+add_library(demo_build_flags INTERFACE)
+target_compile_options(demo_build_flags INTERFACE -O3 -g)
+target_link_options(demo_build_flags INTERFACE -O3 -g)
+
+# --------------------------------------------------------------------------
 # The application is built as a library so that the binary logger's string
 # catalog can be generated from it: `gen_str_catalog` runs `nm` over the
 # library, and the undefined `catalog<>`/`module<>` specializations it finds
@@ -56,6 +72,7 @@ target_include_directories(demo_lib
 # that this target is hosted. Just force with define.
 target_compile_definitions(demo_lib PUBLIC SIMULATE_FREESTANDING)
 target_link_libraries_system(demo_lib PUBLIC async groov stm32-groov cib)
+target_link_libraries(demo_lib PUBLIC demo_build_flags)
 
 # Generate the string catalog from demo_lib:
 #   log_strings.cpp  - the catalog<>/module<> specializations, built into the
@@ -87,7 +104,13 @@ gen_str_catalog(
   demo_log_collateral
 )
 
+# gen_str_catalog creates demo_log_strings above; give it the same settings as
+# the rest of the application.
+target_link_libraries(demo_log_strings PUBLIC demo_build_flags)
+
 add_executable(demo
+  src/startup/startup_gcc.s
+  src/shared/syscalls.c
   src/main.cpp
 )
 target_link_libraries(demo PRIVATE demo_lib demo_log_strings)
