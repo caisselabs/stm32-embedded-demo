@@ -22,6 +22,8 @@ add_versioned_package("gh:caisselabs/stm32-groov#6769da8")
 add_versioned_package("gh:intel/compile-time-init-build#7d269d4")
 
 if(NOT CMAKE_CROSSCOMPILING)
+  include(CTest)
+
   # src/i2c is a work in progress and has no CMakeLists.txt yet; skip it rather
   # than failing the whole host configure. Remove the guard once it has one.
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/i2c/CMakeLists.txt)
