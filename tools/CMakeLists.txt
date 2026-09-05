@@ -26,3 +26,4 @@ endif()
 message(STATUS "pytest found at ${PYTEST_PROGRAM}")
 
 add_unit_test(unwrap_log_test PYTEST FILES test/test_unwrap_log.py)
+add_unit_test(logmon_test PYTEST FILES test/test_logmon.py)

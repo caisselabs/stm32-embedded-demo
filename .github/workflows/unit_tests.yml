@@ -10,6 +10,9 @@ on:
     branches: [ main ]
 
 env:
+  # The tools/ tests skip cases whose optional dependencies are absent. CI
+  # installs them, so here a missing one is a failure, not a quiet skip.
+  LOGMON_REQUIRE_OPTIONAL: 1
   DEBIAN_FRONTEND: noninteractive
   CMAKE_GENERATOR: Ninja
   DEFAULT_CXX_STANDARD: 20
@@ -110,7 +113,17 @@ jobs:
           sudo apt install -y ninja-build
           # add_unit_test(... PYTEST ...) runs the tools/ tests with
           # `pytest -n auto`, so xdist is needed as well as pytest itself.
-          sudo apt install -y python3-pytest python3-pytest-xdist
+          # textual and pyserial back the logmon TUI and serial tests; without
+          # them those cases skip themselves and the job passes having run
+          # noticeably less.
+          sudo apt install -y python3-pytest python3-pytest-xdist \
+                              python3-serial
+          # Not python3-textual: Ubuntu 24.04 ships 0.1.13, which predates
+          # every Textual API logmon/tui.py uses. Take it from PyPI, where the
+          # floor is the oldest version the TUI is known to work against.
+          # --break-system-packages because the runner's python is PEP668
+          # managed and a venv would not be on pytest's path.
+          python3 -m pip install --break-system-packages "textual>=0.52"
 
       - name: Restore CPM cache
         env:
@@ -229,7 +242,17 @@ jobs:
           sudo apt install -y ninja-build
           # add_unit_test(... PYTEST ...) runs the tools/ tests with
           # `pytest -n auto`, so xdist is needed as well as pytest itself.
-          sudo apt install -y python3-pytest python3-pytest-xdist
+          # textual and pyserial back the logmon TUI and serial tests; without
+          # them those cases skip themselves and the job passes having run
+          # noticeably less.
+          sudo apt install -y python3-pytest python3-pytest-xdist \
+                              python3-serial
+          # Not python3-textual: Ubuntu 24.04 ships 0.1.13, which predates
+          # every Textual API logmon/tui.py uses. Take it from PyPI, where the
+          # floor is the oldest version the TUI is known to work against.
+          # --break-system-packages because the runner's python is PEP668
+          # managed and a venv would not be on pytest's path.
+          python3 -m pip install --break-system-packages "textual>=0.52"
 
       - name: Restore CPM cache
         env:
