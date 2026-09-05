@@ -307,14 +307,22 @@ upgrade that moves one of them fails here instead of at the bench. They skip
 themselves when ~logmon.tui~ will not import --- textual missing, or a textual
 too old to have what it imports.
 
-~tools/CMakeLists.txt~ registers both with ~add_unit_test(... PYTEST ...)~, so
-they run with the C++ tests in a host build:
+~tools/CMakeLists.txt~ registers both with ~add_unit_test(... PYTEST ...)~,
+which names them ~PYTHON.unwrap_log_test~ and ~PYTHON.logmon_test~ in ctest and
+hooks them into the ~python_tests~ target:
 
 #+begin_src sh
 cmake -B build -G Ninja
-ninja -C build unit_tests      # C++ and Python tests together
-ninja -C build python_tests    # just these
+ctest --test-dir build                   # C++ and Python tests together
+ctest --test-dir build -R '^PYTHON\.'    # just these
+ctest --test-dir build -E '^PYTHON\.'    # just the C++ tests
+ninja -C build python_tests              # or as part of a build
 #+end_src
+
+CI splits the suite by prefix --- the compiler matrix and the sanitizer jobs pass
+~-E '^PYTHON\.'~, and one ~tool_tests~ job passes ~-R '^PYTHON\.'~ --- and every
+ctest invocation passes ~--no-tests=error~, so a job that registers no tests
+fails instead of quietly passing.
 
 The infrastructure runs them with ~pytest -n auto~, so pytest and pytest-xdist
 have to be installed; ~tools/CMakeLists.txt~ announces and skips them if pytest
@@ -332,7 +340,7 @@ configured once. Set ~BUILD_DIR~ if the build tree is somewhere other than
 Two groups depend on optional packages --- ~TuiTest~ on textual, ~SerialPtyTest~
 on pyserial --- and skip when they are absent. That is right for a bare
 checkout and wrong for CI, where it would quietly shrink the suite by seven
-tests and still report success. CI installs both and sets
+tests and still report success. The ~tool_tests~ job installs both and sets
 ~LOGMON_REQUIRE_OPTIONAL=1~, which turns a missing package into a failure
 naming it. The guard reads the same flags the skips do, so the two cannot
 drift apart.

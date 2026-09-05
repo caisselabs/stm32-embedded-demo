@@ -111,19 +111,6 @@ jobs:
         run: |
           ${{ matrix.install }}
           sudo apt install -y ninja-build
-          # add_unit_test(... PYTEST ...) runs the tools/ tests with
-          # `pytest -n auto`, so xdist is needed as well as pytest itself.
-          # textual and pyserial back the logmon TUI and serial tests; without
-          # them those cases skip themselves and the job passes having run
-          # noticeably less.
-          sudo apt install -y python3-pytest python3-pytest-xdist \
-                              python3-serial
-          # Not python3-textual: Ubuntu 24.04 ships 0.1.13, which predates
-          # every Textual API logmon/tui.py uses. Take it from PyPI, where the
-          # floor is the oldest version the TUI is known to work against.
-          # --break-system-packages because the runner's python is PEP668
-          # managed and a venv would not be on pytest's path.
-          python3 -m pip install --break-system-packages "textual>=0.52"
 
       - name: Restore CPM cache
         env:
@@ -154,9 +141,71 @@ jobs:
       - name: Build Unit Tests
         run: cmake --build ${{github.workspace}}/build --config ${{matrix.build_type}} -v -t build_unit_tests
 
+      # --no-tests=error because an empty test set is a bug, not a pass: this
+      # job ran ctest against zero registered tests for as long as the project
+      # was missing include(CTest). -E excludes the tools/ suites, which
+      # tool_tests owns -- they are unregistered here anyway (no pytest
+      # installed), so the filter is there to keep them out should the runner
+      # image ever grow one.
       - name: Test
         working-directory: ${{github.workspace}}/build
-        run: ctest --output-on-failure -j $(nproc) -C ${{matrix.build_type}}
+        run: ctest --output-on-failure --no-tests=error -j $(nproc) -C ${{matrix.build_type}} -E '^PYTHON\.'
+
+  # The tools/ tests are host-side Python and have nothing to do with the C++
+  # compiler matrix, so one job owns them rather than every job running them.
+  tool_tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build tools
+        run: |
+          sudo apt install -y ninja-build
+          # add_unit_test(... PYTEST ...) runs the tools/ tests with
+          # `pytest -n auto`, so xdist is needed as well as pytest itself.
+          # pyserial backs SerialPtyTest.
+          sudo apt install -y python3-pytest python3-pytest-xdist \
+                              python3-serial
+          # Not python3-textual: Ubuntu 24.04 ships 0.1.13, which predates
+          # every Textual API logmon/tui.py uses. Take it from PyPI, where the
+          # floor is the oldest version the TUI is known to work against.
+          # --break-system-packages because the runner's python is PEP668
+          # managed and a venv would not be on pytest's path.
+          python3 -m pip install --break-system-packages "textual>=0.52"
+
+      - name: Restore CPM cache
+        env:
+          cache-name: cpm-cache-0
+        id: cpm-cache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: |
+            ${{runner.os}}-${{env.cache-name}}-
+
+      # Configure only -- nothing here needs the C++ built. The configure is not
+      # optional though: tools/logmon/cib.py reads build/CMakeCache.txt to locate
+      # CIB's mipi_messages.py, and every decoder case skips without it. The
+      # runner's default toolchain is enough to configure with.
+      - name: Configure CMake
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_CXX_STANDARD=${{env.DEFAULT_CXX_STANDARD}} -DCPM_SOURCE_CACHE=~/cpm-cache
+
+      - name: Save CPM cache
+        env:
+          cache-name: cpm-cache-0
+        if: steps.cpm-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/cpm-cache
+          key: ${{runner.os}}-${{env.cache-name}}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+
+      # --no-tests=error is the point of this job: tools/CMakeLists.txt skips
+      # registering the suites when pytest is not found, which is right for a
+      # bare checkout and would otherwise let this job pass having run nothing.
+      - name: Test
+        working-directory: ${{github.workspace}}/build
+        run: ctest --output-on-failure --no-tests=error -R '^PYTHON\.'
 
   quality_checks_pass:
     runs-on: ubuntu-24.04
@@ -240,19 +289,6 @@ jobs:
         run: |
           ${{ matrix.install }}
           sudo apt install -y ninja-build
-          # add_unit_test(... PYTEST ...) runs the tools/ tests with
-          # `pytest -n auto`, so xdist is needed as well as pytest itself.
-          # textual and pyserial back the logmon TUI and serial tests; without
-          # them those cases skip themselves and the job passes having run
-          # noticeably less.
-          sudo apt install -y python3-pytest python3-pytest-xdist \
-                              python3-serial
-          # Not python3-textual: Ubuntu 24.04 ships 0.1.13, which predates
-          # every Textual API logmon/tui.py uses. Take it from PyPI, where the
-          # floor is the oldest version the TUI is known to work against.
-          # --break-system-packages because the runner's python is PEP668
-          # managed and a venv would not be on pytest's path.
-          python3 -m pip install --break-system-packages "textual>=0.52"
 
       - name: Restore CPM cache
         env:
@@ -289,7 +325,11 @@ jobs:
         run: sudo sysctl vm.mmap_rnd_bits=28
 
       - name: Build Unit Tests
-        run: cmake --build ${{github.workspace}}/build -t unit_tests
+        run: cmake --build ${{github.workspace}}/build -t build_unit_tests
+
+      - name: Test
+        working-directory: ${{github.workspace}}/build
+        run: ctest --output-on-failure --no-tests=error -j $(nproc) -E '^PYTHON\.'
 
   mutate:
     runs-on: ubuntu-24.04
@@ -341,7 +381,7 @@ jobs:
 
   merge_ok:
     runs-on: ubuntu-24.04
-    needs: [build_and_test_24, sanitize]
+    needs: [build_and_test_24, sanitize, tool_tests]
     if: ${{ !cancelled() }}
     steps:
       - name: Enable merge
