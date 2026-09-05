@@ -70,7 +70,25 @@ arguments are sent along with the ID.
 CIB's flow machinery logs at ~TRACE~, so ~flow.start(...)~ / ~flow.end(...)~
 entries appear in the catalogue for free.
 
-** Decoding
+** Tooling
+
+Two host-side tools. Both decode the same packets with the same code --- CIB's
+~mipi_messages.py~ --- and differ only in where the bytes come from.
+
+| tool                  | reads                             | when                            |
+|-----------------------+-----------------------------------+---------------------------------|
+| ~tools/unwrap_log.py~ | a GDB dump of ~app_log::buffer~   | target halted under the debugger |
+| ~tools/logmon~        | a serial port, or a saved capture | target running                  |
+
+They compose: ~unwrap_log.py~ emits a bare packet stream, which is exactly what
+~logmon --replay~ expects, so a ring-buffer dump can be viewed in the TUI:
+
+#+begin_src sh
+python3 tools/unwrap_log.py --input log.bin > ring.bin
+python3 tools/logmon --replay ring.bin --catalog build/log_strings.json
+#+end_src
+
+*** Offline: dumping the ring buffer
 
 Dump the whole buffer --- header included --- from GDB, flatten it, and run it
 through CIB's decoder:
@@ -106,7 +124,7 @@ exits 0 --- the decoder simply sees an empty stream. The diagnostic is on
 stderr either way, but use ~set -o pipefail~ if the exit code is being
 checked.
 
-*** Why not dump ~app_log::buffer.words~ directly
+**** Why not dump ~app_log::buffer.words~ directly
 
 The decoder reads packets back-to-back: no framing, no end marker, no length
 outside the packets themselves. That makes the raw ring unusable in two ways,
@@ -139,16 +157,158 @@ underlying member:
 (gdb) dump binary value log.bin app_log::buffer.words._M_elems[0]@app_log::buffer.total_words
 #+end_src
 
+**** Truncated final packet
+
+The ring is written a word at a time, so halting the target midway through a
+multi-word packet leaves a partial one at the end and the decoder runs off the
+end of the file. Not reachable while every call site is a single-word Short32,
+but it becomes possible as soon as something logs with runtime arguments.
+
+*** Live: monitoring over serial
+
+~tools/logmon~ reads the packet stream off the target's serial line and
+decodes it as it arrives.
+
+#+begin_src sh
+# live, with the TUI
+python3 tools/logmon --port /dev/ttyACM0 --catalog build/log_strings.json
+
+# plain stdout, and keep the raw bytes for later
+python3 tools/logmon --port --plain --capture session.bin \
+    --catalog build/log_strings.json
+
+# replay a capture (or an unwrap_log.py output) with no board attached
+python3 tools/logmon --replay session.bin --catalog build/log_strings.json
+#+end_src
+
+The TUI needs textual --- from PyPI (~pip install 'textual>=0.52'~), not from
+the distro: Ubuntu 24.04's ~python3-textual~ is 0.1.13 and predates every
+Textual API the TUI uses, so it imports and then fails. Without textual the
+tool says so and falls back to ~--plain~. Serial reading needs pyserial
+(~python3-serial~). Keys: ~space~ pause, ~c~ clear, ~q~ quit.
+
+Pause freezes the view without losing anything: records keep being drained off
+the reader thread into a bounded holding buffer and are appended on resume, so
+a pause taken to read something does not silently drop what arrived meanwhile.
+The buffer is capped at the same row limit as the table, so a long pause on a
+chatty target cannot grow without bound --- and a ~--capture~ file has
+everything either way.
+
+~--catalog~ takes the ~log_strings.json~ matching the running firmware. The
+file is re-read when its mtime changes, so a rebuild is picked up without
+restarting the monitor.
+
+**** Layout
+
+| module               | role                                                  |
+|----------------------+-------------------------------------------------------|
+| ~logmon/cib.py~      | finds and imports CIB's ~mipi_messages.py~            |
+| ~logmon/catalog.py~  | loads ~--catalog~ JSON; re-reads it when mtime changes |
+| ~logmon/decode.py~   | byte stream to records: alignment, resync, counters   |
+| ~logmon/sources.py~  | ~SerialSource~ (pyserial), ~FileSource~ (replay)      |
+| ~logmon/cli.py~      | argument handling and ~--plain~ output                |
+| ~logmon/tui.py~      | the Textual app                                       |
+
+~cib.py~ locates the CIB checkout by reading
+~CPM_PACKAGE_compile-time-init-build_SOURCE_DIR~ out of ~CMakeCache.txt~,
+because the path moves depending on whether ~CPM_SOURCE_CACHE~ was set when
+the project was configured. ~BUILD_DIR~ overrides which build tree is
+consulted and ~CIB_PYTHON~ points straight at the directory holding
+~mipi_messages.py~.
+
+One implementation note worth knowing before editing ~decode.py~: a packet's
+length is not knowable up front. A Catalog message's length depends on the
+argument list looked up from its ID, and CIB's message classes pull bytes off
+an iterator without reporting how many they took. A small counting iterator
+wrapper is what tells the buffer how far to advance.
+
+The reader runs on a worker thread and pushes records onto a queue that the UI
+drains on a timer. Decoding on the event loop instead would let a chatty target
+starve the UI --- at 115200 the target can emit a packet roughly every 350us,
+far faster than a sensible repaint rate.
+
+**** Command line
+
+| flag                | meaning                                                     |
+|---------------------+-------------------------------------------------------------|
+| ~--port [PORT]~     | serial port; bare ~--port~ means ~/dev/ttyACM0~             |
+| ~--replay FILE~     | read a saved stream instead of a port                       |
+| ~--catalog FILE~    | ~log_strings.json~ matching the running firmware            |
+| ~--baud N~          | default 115200; must match the firmware's USART2 setting    |
+| ~--capture FILE~    | tee every received byte, for a later ~--replay~             |
+| ~--align N~         | 0-3, or ~auto~; defaults to ~auto~ for a port, 0 for a replay |
+| ~--plain~           | print to stdout instead of starting the TUI                 |
+| ~--replay-delay S~  | pause between replay chunks, to pace the UI                 |
+
+Capture whenever a session might be worth a second look: it costs nothing and
+turns any oddity into something reproducible off the bench.
+
+**** Reading an unframed stream
+
+The target writes packets to the wire as bare little-endian words: no
+delimiter, no length, no sync marker. That decodes fine from a known packet
+boundary --- which a RAM dump is --- but a live line is not so tidy, so
+~logmon/decode.py~ recovers on its own:
+
+- *Byte alignment.* Attaching mid-word leaves every following word out of
+  phase. ~detect_alignment()~ scores all four offsets by how many packets each
+  decodes cleanly and picks the winner. ~--align 0..3~ forces one.
+- *Resync.* An undecodable packet advances the buffer by one word rather than
+  one byte: with raw words, packet boundaries are word-aligned once the byte
+  alignment is right. The bad word is shown as a hex dump rather than
+  swallowed.
+- *Incomplete vs corrupt.* CIB's decoder raises the same ~ValueError~ for "ran
+  off the end of the buffer" as for a bad packet. They are told apart by
+  whether the decode consumed everything available; a packet still undecodable
+  past ~MAX_PACKET_BYTES~ is judged corrupt, so an unknown ID cannot stall the
+  stream forever.
+
+A stale catalog is the common cause of undecodable packets: the ID is real but
+absent from the JSON, and since a Catalog packet's length depends on its
+argument list, an unknown ID cannot even be skipped by length. Watch the error
+counter in the status bar.
+
+If the link turns out to be noisy, the fix is framing on the target (COBS with
+a 0x00 delimiter makes resync exact rather than heuristic). ~decode.py~ is the
+only module that would change.
+
+
 *** Tests
 
-~tools/test/test_unwrap_log.py~ covers ~unwrap_log.py~ --- ring-model
-equivalence across capacities and wrap points, the CLI contract the pipeline
-relies on (packets on stdout, progress on stderr, non-zero exit on a bad
-dump), and end-to-end runs through the real ~log_decode.py~ that pin both
-failure modes described above.
+| file                             | covers                                             |
+|----------------------------------+----------------------------------------------------|
+| ~tools/test/test_unwrap_log.py~  | ~unwrap_log.py~ --- 25 tests                       |
+| ~tools/test/test_logmon.py~      | everything under ~logmon~'s UI --- 15 tests        |
 
-~tools/CMakeLists.txt~ registers them with ~add_unit_test(... PYTEST ...)~, so
-they are part of the normal test run in a host build:
+~test_unwrap_log.py~ checks ring-model equivalence across capacities and wrap
+points, the CLI contract the pipeline depends on (packets on stdout, progress
+on stderr, non-zero exit on a bad dump), and end-to-end runs through the real
+~log_decode.py~ that pin both failure modes described above.
+
+~test_logmon.py~ covers catalog loading and hot-reload, chunk-boundary
+handling (arbitrary splits, and one byte at a time --- the serial case),
+partial packets held rather than dropped, resync after corruption, unknown IDs
+reported rather than fatal, the undecodable-tail cap, and all four byte
+alignments. Two are worth calling out:
+
+- A *pty test* opens a real tty pair with ~os.openpty()~ and drives the actual
+  pyserial path, so the serial source is exercised without a board.
+- A *property test* injects seeded-random corruption and asserts the decoder
+  never emits a message that was not in the catalog. Corruption may lose
+  packets; it must never invent them.
+
+~TuiTest~ drives the Textual app headlessly through Textual's own test pilot:
+a replay landing as rows, undecodable words appearing rather than killing the
+app, the row cap trimming oldest-first, pause holding and then draining, byte
+alignment resolved in the UI, and the status bar's markup rendering as style
+rather than literal text. These reach APIs the decoder tests never touch ---
+~DataTable.remove_row~, worker threads, the pause path --- so a Textual
+upgrade that moves one of them fails here instead of at the bench. They skip
+themselves when ~logmon.tui~ will not import --- textual missing, or a textual
+too old to have what it imports.
+
+~tools/CMakeLists.txt~ registers both with ~add_unit_test(... PYTEST ...)~, so
+they run with the C++ tests in a host build:
 
 #+begin_src sh
 cmake -B build -G Ninja
@@ -156,25 +316,26 @@ ninja -C build unit_tests      # C++ and Python tests together
 ninja -C build python_tests    # just these
 #+end_src
 
-The infrastructure runs them with ~pytest -n auto~, so pytest and
-pytest-xdist have to be installed; ~tools/CMakeLists.txt~ announces and skips
-them if pytest is missing rather than breaking the default build. The test
-file is plain ~unittest~, so it also runs on its own with no pytest at all:
+The infrastructure runs them with ~pytest -n auto~, so pytest and pytest-xdist
+have to be installed; ~tools/CMakeLists.txt~ announces and skips them if pytest
+is missing rather than breaking the default build. Both files are plain
+~unittest~, so they also run with no pytest at all:
 
 #+begin_src sh
 python3 -m unittest discover -s tools/test -v
 #+end_src
 
-The end-to-end cases need ~log_decode.py~ and so skip themselves until the
-project has been configured once. Set ~BUILD_DIR~ if the build tree is
-somewhere other than ~build/~ or ~build-host/~.
+Cases needing CIB's decoder skip themselves until the project has been
+configured once. Set ~BUILD_DIR~ if the build tree is somewhere other than
+~build/~ or ~build-host/~.
 
-*** Truncated final packet
-
-The ring is written a word at a time, so halting the target midway through a
-multi-word packet leaves a partial one at the end and the decoder runs off the
-end of the file. Not reachable while every call site is a single-word Short32,
-but it becomes possible as soon as something logs with runtime arguments.
+Two groups depend on optional packages --- ~TuiTest~ on textual, ~SerialPtyTest~
+on pyserial --- and skip when they are absent. That is right for a bare
+checkout and wrong for CI, where it would quietly shrink the suite by seven
+tests and still report success. CI installs both and sets
+~LOGMON_REQUIRE_OPTIONAL=1~, which turns a missing package into a failure
+naming it. The guard reads the same flags the skips do, so the two cannot
+drift apart.
 
 ** Version logging
 
