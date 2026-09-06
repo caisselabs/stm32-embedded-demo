@@ -369,7 +369,7 @@ only module that would change.
 | file                             | covers                                             |
 |----------------------------------+----------------------------------------------------|
 | ~tools/test/test_unwrap_log.py~  | ~unwrap_log.py~ --- 25 tests                       |
-| ~tools/test/test_logmon.py~      | everything under ~logmon~'s UI --- 34 tests        |
+| ~tools/test/test_logmon.py~      | everything under ~logmon~'s UI --- 36 tests        |
 
 ~test_unwrap_log.py~ checks ring-model equivalence across capacities and wrap
 points, the CLI contract the pipeline depends on (packets on stdout, progress
@@ -390,13 +390,60 @@ alignments. Two are worth calling out:
 
 ~TuiTest~ drives the Textual app headlessly through Textual's own test pilot:
 a replay landing as rows, undecodable words appearing rather than killing the
-app, the row cap trimming oldest-first, pause holding and then draining, byte
-alignment resolved in the UI, the status bar's markup rendering as style
-rather than literal text, and ~q~ actually ending the reader thread. These
-reach APIs the decoder tests never touch --- ~DataTable.remove_row~, worker
-threads, the pause path --- so a Textual upgrade that moves one of them fails
-here instead of at the bench. They skip themselves when ~logmon.tui~ will not
-import --- textual missing, or a textual too old to have what it imports.
+app, the row cap shedding oldest-first, overflow being counted rather than
+silently dropped, pause holding and then draining, byte alignment resolved in
+the UI, the status bar's markup rendering as style rather than literal text,
+and ~q~ actually ending the reader thread. These reach APIs the decoder tests
+never touch --- ~DataTable~ mutation, worker threads, the pause path --- so a
+Textual upgrade that moves one of them fails here instead of at the bench.
+They skip themselves when ~logmon.tui~ will not import --- textual missing, or
+a textual too old to have what it imports.
+
+Two of them are about throughput rather than correctness, and both exist
+because the UI once wedged at 100% CPU under a constant stream (see /Keeping
+up with the target/ below):
+
+- ~test_rows_are_shed_without_per_row_removal~ stubs ~DataTable.remove_row~
+  and asserts it is never called. It is a call count and not a stopwatch on
+  purpose: the cost is quadratic in the row count, so at any table size a unit
+  test can build, the slow version is still fast enough to pass a timing
+  assertion.
+- ~test_overflow_is_counted_not_silently_dropped~ asserts every decoded record
+  is either on screen or in the ~dropped~ counter.
+
+Both need the source *paced*, via ~make_paced_app~. Delivered in one burst a
+stream is truncated to a single tick's worth before it ever reaches the table,
+the row cap is never reached, and the tests pass without exercising anything
+--- which is exactly how the first version of them was wrong.
+
+*** Keeping up with the target
+
+A saturated 115200 link is 11520 bytes/s, so 2880 four-byte packets a second.
+Nothing about the UI is allowed to scale with that rate:
+
+- Decoding happens on the reader thread and the queue is drained in full every
+  tick, so the target is never throttled by the UI.
+- Rows are added to the ~DataTable~ at most ~MAX_APPEND_PER_TICK~ per 0.1s
+  tick. That is set to 400 --- above the 288 a saturated link delivers, so the
+  intended link renders losslessly, while a ~--replay~ streaming at disk speed
+  is bounded rather than allowed to take the tick to arbitrary length. What the
+  bound discards is counted and shown as ~dropped=~ in the status bar; the
+  ~--capture~ file still has every byte.
+- Rows are *never* removed one at a time. ~DataTable.remove_row~ rebuilds the
+  row-index map, bumps the update counter (discarding the ordered-row cache)
+  and drags the cursor and hover reactives through a refresh, which makes it
+  O(rows) --- about 9ms per call on a 20000-row table. Trimming k rows that way
+  is O(rows*k), and it is what pinned the CPU and froze the UI: past the cap a
+  single drain tick took minutes. Instead the table is left to overshoot by
+  ~TRIM_SLACK~ and then rebuilt with ~clear()~ + ~add_rows()~, one O(rows) pass
+  that sheds the whole overshoot at once.
+
+~MAX_ROWS~ is therefore sized by what a rebuild costs, not by how much
+scrollback would be nice to have: a rebuild is the one unavoidable hitch, and
+it runs about 50us a row. At 2000 rows that is a ~90ms pause; at 5000 it is
+~250ms, which is visible. Measured against a saturated link, the current
+settings drop nothing and stall the event loop 83ms at worst. Scrollback past
+~MAX_ROWS~ is what ~--capture~ and ~--replay~ are for.
 
 The quit test is worth a note. A Textual thread worker cannot be interrupted,
 only asked to stop, so a reader that ignores cancellation keeps the process
