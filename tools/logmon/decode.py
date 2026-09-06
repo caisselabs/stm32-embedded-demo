@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import itertools
 import struct
+import time
 from dataclasses import dataclass, field
 
 from .cib import load_mipi_messages
@@ -217,6 +218,67 @@ def detect_alignment(sample: bytes, catalog, mipi=None, probes: int = 16) -> int
         if score > best_score:
             best_offset, best_score = offset, score
     return best_offset
+
+
+class Aligner:
+    """Holds bytes back until the byte alignment can be scored.
+
+    Attaching to a live line mid-word puts every following word out of phase,
+    and the only way to tell is to try decoding from each of the four offsets
+    -- which needs traffic. So bytes are buffered until there is enough to
+    judge, then released with the winning offset stripped off the front.
+
+    "Enough" cannot be a byte count alone. A target that logs a few packets at
+    boot and then goes quiet sits below any threshold forever, and holding its
+    bytes back looks exactly like a dead link -- which is the more likely
+    reading, so it is the more damaging failure. A quiet gap therefore also
+    resolves the alignment, on whatever has arrived by then.
+
+    Scoring on a handful of bytes is less certain than on a full sample. That
+    is the right trade: a wrong guess shows up as records flagged bad, which
+    is visible and recoverable, whereas showing nothing is neither.
+    """
+
+    SAMPLE = 64
+    QUIET = 0.5
+
+    def __init__(self, catalog, mipi=None, align=None, clock=time.monotonic):
+        self.catalog = catalog
+        self.mipi = mipi
+        self.align = align
+        self._clock = clock
+        self._pending = bytearray()
+        self._last_data = clock()
+
+    @property
+    def resolved(self) -> bool:
+        return self.align is not None
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Bytes ready to decode, which is b"" while still holding back."""
+        if self.align is not None:
+            return chunk
+        if chunk:
+            self._pending += chunk
+            self._last_data = self._clock()
+        if len(self._pending) >= self.SAMPLE:
+            return self._resolve()
+        if self._pending and self._clock() - self._last_data >= self.QUIET:
+            return self._resolve()
+        return b""
+
+    def flush(self) -> bytes:
+        """Whatever is still held, at end of stream."""
+        if self.align is None and self._pending:
+            return self._resolve()
+        return b""
+
+    def _resolve(self) -> bytes:
+        self.align = detect_alignment(bytes(self._pending), self.catalog,
+                                      self.mipi)
+        data = bytes(self._pending[self.align:])
+        self._pending.clear()
+        return data
 
 
 def words_to_bytes(words) -> bytes:

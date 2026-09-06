@@ -14,7 +14,7 @@ import sys
 
 from .catalog import Catalog
 from .cib import DecoderUnavailable, find_build_dir, load_mipi_messages
-from .decode import Decoder, detect_alignment
+from .decode import Aligner, Decoder
 from .sources import FileSource, SerialSource
 
 DEFAULT_PORT = "/dev/ttyACM0"
@@ -126,20 +126,17 @@ def run_plain(args) -> int:
             prefix = "" if record.ok else "!! "
             print(f"{prefix}{record.text}", flush=True)
 
-    # Alignment is scored on real traffic, so hold bytes back until there is
-    # enough to judge -- or until the stream ends, whichever comes first. A
-    # short capture must still be decoded, not silently swallowed.
-    pending = bytearray()
-    resolved = align if align != "auto" else None
-    SAMPLE = 64
+    # Alignment is scored on real traffic, so bytes are held back until there
+    # is enough to judge -- or the target goes quiet, or the stream ends. See
+    # Aligner: a short burst must still be decoded, not silently swallowed.
+    aligner = Aligner(catalog, mipi, align=None if align == "auto" else align)
+    announced = aligner.resolved
 
-    def resolve_alignment():
-        nonlocal resolved
-        resolved = detect_alignment(bytes(pending), catalog, mipi)
-        print(f"# byte alignment: {resolved}", file=sys.stderr)
-        data = bytes(pending[resolved:])
-        pending.clear()
-        return data
+    def note_alignment():
+        nonlocal announced
+        if not announced and aligner.resolved:
+            print(f"# byte alignment: {aligner.align}", file=sys.stderr)
+            announced = True
 
     try:
         with source:
@@ -148,16 +145,15 @@ def run_plain(args) -> int:
                     capture.write(chunk)
                     capture.flush()
 
-                if resolved is None:
-                    pending += chunk
-                    if len(pending) < SAMPLE:
-                        continue
-                    chunk = resolve_alignment()
+                data = aligner.feed(chunk)
+                note_alignment()
+                if data:
+                    emit(decoder.feed(data))
 
-                emit(decoder.feed(chunk))
-
-            if resolved is None and pending:
-                emit(decoder.feed(resolve_alignment()))
+            tail = aligner.flush()
+            note_alignment()
+            if tail:
+                emit(decoder.feed(tail))
     except KeyboardInterrupt:
         pass
     finally:

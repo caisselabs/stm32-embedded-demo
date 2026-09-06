@@ -249,6 +249,112 @@ class AlignmentTest(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_CIB, "CIB mipi_messages.py not found -- configure first")
 @unittest.skipUnless(HAVE_PYSERIAL, "pyserial not installed")
+class FakeClock:
+    """Deterministic stand-in for time.monotonic in Aligner."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
+
+
+class AlignerTest(unittest.TestCase):
+    """The hold-back that decides byte alignment.
+
+    Alignment can only be scored against real traffic, so bytes are buffered
+    first. The hazard is the buffer becoming a black hole: a target that logs
+    a few packets at boot and goes quiet never reaches the sample size, and
+    holding its bytes forever is indistinguishable from a dead link. These pin
+    every way the hold-back is allowed to end.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.catalog = Catalog.load(write_catalog(self.tmp.name))
+        self.clock = FakeClock()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def aligner(self, align=None):
+        from logmon.decode import Aligner
+
+        return Aligner(self.catalog, align=align, clock=self.clock)
+
+    def test_holds_back_below_the_sample_size(self):
+        a = self.aligner()
+        self.assertEqual(a.feed(stream([0, 1])), b"")
+        self.assertFalse(a.resolved)
+
+    def test_resolves_once_the_sample_fills(self):
+        a = self.aligner()
+        data = stream(list(range(2)) * 16)  # 128 bytes, over SAMPLE
+        out = a.feed(data)
+        self.assertTrue(a.resolved)
+        self.assertEqual(out, data)
+
+    def test_quiet_gap_releases_a_short_burst(self):
+        """The fix: silence must not be mistaken for 'keep waiting'."""
+        a = self.aligner()
+        burst = stream([0, 1])
+        self.assertEqual(a.feed(burst), b"")
+
+        # A quiet link yields b"" on every read timeout.
+        self.clock.advance(a.QUIET / 2)
+        self.assertEqual(a.feed(b""), b"")
+        self.assertFalse(a.resolved, "resolved before the gap was long enough")
+
+        self.clock.advance(a.QUIET)
+        self.assertEqual(a.feed(b""), burst)
+        self.assertTrue(a.resolved)
+        self.assertEqual(a.align, 0)
+
+    def test_more_data_restarts_the_quiet_gap(self):
+        a = self.aligner()
+        a.feed(stream([0]))
+        self.clock.advance(a.QUIET * 0.9)
+        a.feed(stream([1]))          # traffic resumed
+        self.clock.advance(a.QUIET * 0.9)
+        self.assertEqual(a.feed(b""), b"", "gap measured from the wrong point")
+        self.assertFalse(a.resolved)
+
+    def test_flush_releases_at_end_of_stream(self):
+        a = self.aligner()
+        burst = stream([0, 1])
+        a.feed(burst)
+        self.assertEqual(a.flush(), burst)
+        self.assertTrue(a.resolved)
+
+    def test_flush_on_an_empty_stream_is_harmless(self):
+        a = self.aligner()
+        self.assertEqual(a.flush(), b"")
+
+    def test_passes_through_once_resolved(self):
+        a = self.aligner()
+        a.feed(stream(list(range(2)) * 16))
+        self.assertTrue(a.resolved)
+        later = stream([0])
+        self.assertEqual(a.feed(later), later, "still buffering after resolve")
+
+    def test_preset_alignment_never_buffers(self):
+        a = self.aligner(align=0)
+        one = stream([0])
+        self.assertEqual(a.feed(one), one)
+
+    def test_quiet_gap_still_finds_a_nonzero_offset(self):
+        a = self.aligner()
+        misaligned = b"\x00\x00" + stream([0, 1])
+        a.feed(misaligned)
+        self.clock.advance(a.QUIET * 2)
+        out = a.feed(b"")
+        self.assertEqual(a.align, 2)
+        self.assertEqual(out, misaligned[2:])
+
+
 class SerialPtyTest(unittest.TestCase):
     """Exercise the real pyserial path against a pty, with no hardware."""
 
@@ -278,6 +384,44 @@ class SerialPtyTest(unittest.TestCase):
                 if len(texts) >= 4:
                     break
             self.assertEqual(texts, NAMES)
+        finally:
+            source.close()
+            os.close(master)
+            os.close(slave)
+
+    def test_a_quiet_port_yields_empty_chunks(self):
+        """The contract Aligner's quiet-gap release depends on.
+
+        SerialSource yields b"" on every read timeout rather than blocking, so
+        an idle link keeps calling Aligner.feed() and the gap can be noticed.
+        If a future rewrite made an idle port block instead, a short burst
+        would be held forever again -- with the unit tests still passing,
+        because they drive feed() directly.
+        """
+        from logmon.sources import SerialSource
+
+        master, slave = os.openpty()
+        source = SerialSource(os.ttyname(slave), timeout=0.05)
+        try:
+            # Open before writing: pyserial flushes the input buffer on open,
+            # so anything sent earlier is discarded.
+            source.open()
+            it = iter(source)
+            os.write(master, stream([0]))
+
+            seen_data, seen_empty = False, False
+            for _ in range(20):                 # bounded: ~1s worst case
+                chunk = next(it)
+                seen_data = seen_data or bool(chunk)
+                seen_empty = seen_empty or (seen_data and chunk == b"")
+                if seen_empty:
+                    break
+            self.assertTrue(seen_data, "pty never delivered the burst")
+            self.assertTrue(
+                seen_empty,
+                "an idle port never yielded b\"\": Aligner would never see "
+                "the quiet gap and a short burst would be held forever",
+            )
         finally:
             source.close()
             os.close(master)
@@ -472,6 +616,22 @@ class TuiTest(unittest.IsolatedAsyncioTestCase):
             table = await self.settle(app, 10)
             self.assertEqual(app.align, 3)
             self.assertEqual(self.messages(table)[:4], NAMES)
+
+    async def test_short_replay_lands_with_auto_alignment(self):
+        """A capture smaller than the alignment sample must still appear.
+
+        The UI used to buffer for a 64-byte sample and drop whatever was left
+        when the source ended, so a two-packet capture rendered nothing at all.
+        """
+        app = self.make_app(stream([0, 1]), align="auto", chunk=8)
+        async with app.run_test(size=(100, 24)):
+            table = await self.settle(app, 2)
+            self.assertEqual(
+                self.messages(table), NAMES[:2],
+                "short replay produced no rows: the held-back bytes were "
+                "dropped instead of flushed when the source ended",
+            )
+            self.assertEqual(app.align, 0)
 
     async def test_status_bar_markup_renders(self):
         """Markup must be interpreted, not printed literally."""
