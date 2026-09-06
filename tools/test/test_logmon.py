@@ -526,14 +526,48 @@ class TuiTest(unittest.IsolatedAsyncioTestCase):
             "non-daemon threads still running after quit; the process would hang",
         )
 
-    def make_app(self, data, align=0, chunk=8):
+    def make_app(self, data, align=0, chunk=8, delay=0.002):
         from logmon.sources import FileSource
         from logmon.tui import LogMonApp
 
         return LogMonApp(
-            FileSource(self.capture(data), chunk=chunk, delay=0.002),
+            FileSource(self.capture(data), chunk=chunk, delay=delay),
             self.catalog,
             align,
+        )
+
+    def query_table(self, app):
+        from textual.widgets import DataTable
+
+        return app.query_one(DataTable)
+
+    def make_paced_app(self, n, *, max_rows, slack):
+        """An app whose stream is spread over many drain ticks.
+
+        Row shedding only happens once the table has grown past
+        MAX_ROWS + TRIM_SLACK, and it can only grow that far across several
+        ticks: _pending is itself capped at MAX_ROWS, so a stream delivered in
+        one burst is truncated to a single tick's worth before it ever reaches
+        the table and the cap is never reached. Pacing the source is what
+        makes the overshoot -- and therefore the rebuild -- actually happen.
+
+        The caps are patched for the lifetime of the returned app, and
+        restored by addCleanup rather than a finally, because _pending's
+        length is fixed at construction.
+        """
+        from logmon import tui
+
+        saved = (tui.MAX_ROWS, tui.TRIM_SLACK)
+
+        def restore():
+            tui.MAX_ROWS, tui.TRIM_SLACK = saved
+
+        self.addCleanup(restore)
+        tui.MAX_ROWS, tui.TRIM_SLACK = max_rows, slack
+        # 4 packets a chunk with a 20ms pause: about 200 records/s, so each
+        # 0.1s drain sees a handful and the table climbs steadily.
+        return self.make_app(
+            stream([i % 4 for i in range(n)]), chunk=16, delay=0.02
         )
 
     async def settle(self, app, want, tries=80):
@@ -551,6 +585,30 @@ class TuiTest(unittest.IsolatedAsyncioTestCase):
     def messages(self, table):
         return [str(table.get_row_at(i)[3]) for i in range(table.row_count)]
 
+    async def absorb(self, app, n, tries=400):
+        """Wait until every decoded record has been through a drain tick.
+
+        Waiting on the decoder alone is not enough and silently makes a test
+        vacuous: the reader thread fills the queue long before the 0.1s drain
+        timer first fires, so `packets == n` can be true while the table is
+        still empty. Rendering is finished only once the queue and the pending
+        buffer are both drained as well.
+        """
+        import asyncio
+
+        for _ in range(tries):
+            await asyncio.sleep(0.02)
+            if (app.decoder.stats.packets == n
+                    and app.queue.empty()
+                    and not app._pending):
+                await asyncio.sleep(0.05)
+                return
+        raise AssertionError(
+            f"stream never finished rendering: packets="
+            f"{app.decoder.stats.packets}/{n} queue={app.queue.qsize()} "
+            f"pending={len(app._pending)}"
+        )
+
     async def test_decodes_a_replay_into_rows(self):
         app = self.make_app(stream([0, 1, 2, 3]))
         async with app.run_test(size=(100, 24)):
@@ -566,24 +624,113 @@ class TuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any("undecodable" in r for r in rows), rows)
             self.assertEqual(app.decoder.stats.errors, 1)
 
-    async def test_row_cap_trims_oldest(self):
-        """DataTable.remove_row is the API most likely to shift under us."""
-        import asyncio
+    async def test_row_cap_sheds_oldest_by_rebuilding(self):
+        """The cap is MAX_ROWS + TRIM_SLACK, shed in one rebuild.
 
+        Rows are not trimmed one at a time -- DataTable.remove_row is O(rows),
+        so per-row trimming is O(rows*k) and wedges the UI (see
+        test_rows_are_shed_without_per_row_removal). The table is instead left
+        to overshoot by TRIM_SLACK and then rebuilt from the newest MAX_ROWS,
+        so what this pins down is the overshoot bound and that the rows kept
+        are the newest ones.
+
+        The stream is paced: delivered in one burst it would all land in a
+        single drain, and the table would never grow past one tick's worth.
+        """
+        app = self.make_paced_app(200, max_rows=10, slack=5)
+        async with app.run_test(size=(100, 24)):
+            table = self.query_table(app)
+            await self.absorb(app, 200)
+
+            self.assertEqual(app.decoder.stats.packets, 200)
+            self.assertGreaterEqual(table.row_count, 1)
+            self.assertLessEqual(
+                table.row_count, 15,
+                "table grew past MAX_ROWS + TRIM_SLACK; the rebuild never ran",
+            )
+            self.assertLessEqual(len(app._rows), 10)
+            # The view has to be showing the end of the stream. A rebuild that
+            # kept the oldest rows would leave it stuck at boot forever, which
+            # is the failure that matters and the one a row count cannot see.
+            self.assertEqual(self.messages(table)[-1], NAMES[(200 - 1) % 4])
+
+    async def test_rows_are_shed_without_per_row_removal(self):
+        """The regression for the 100%-CPU hang.
+
+        DataTable.remove_row rebuilds the row-index map, bumps the update
+        count (throwing away the ordered-row cache) and drags the cursor and
+        hover reactives through a refresh, so it costs O(rows) -- measured at
+        ~9ms per call on a 20000-row table. The old trim called it once per
+        row shed, making a full table O(rows*k) to trim: past the cap a single
+        drain took longer than the 0.1s tick interval, the CPU pinned at 100%
+        and the UI stopped repainting.
+
+        Asserted as a call count rather than a duration on purpose. The cost
+        only shows up at a table size too large to build in a unit test, so a
+        stopwatch here passes just as happily on the quadratic code -- what
+        actually has to hold is that shedding rows does not go through
+        remove_row at all.
+        """
+        from textual.widgets import DataTable
+
+        calls = []
+        original_remove = DataTable.remove_row
+        DataTable.remove_row = lambda self, key: calls.append(key)
+        try:
+            n = 400
+            app = self.make_paced_app(n, max_rows=10, slack=5)
+            async with app.run_test(size=(100, 24)):
+                table = self.query_table(app)
+                await self.absorb(app, n)
+
+                self.assertEqual(app.decoder.stats.packets, n)
+                shed = n - app.dropped - table.row_count
+                # Guard against a vacuous pass: rows have to have reached the
+                # table and then been shed from it, or a stubbed-out
+                # remove_row proves nothing.
+                self.assertGreater(
+                    shed, 10,
+                    f"only {shed} rows were shed (dropped={app.dropped}, "
+                    f"rows={table.row_count}); the cap was never exercised",
+                )
+                self.assertEqual(
+                    calls, [],
+                    f"{len(calls)} calls to DataTable.remove_row: rows are "
+                    "being trimmed one at a time again, which is O(rows) per "
+                    "call and is what wedged the UI",
+                )
+        finally:
+            DataTable.remove_row = original_remove
+
+    async def test_overflow_is_counted_not_silently_dropped(self):
+        """What the cap discards has to show up in the status bar.
+
+        Bounding the rows rendered per tick means a fast stream is shown with
+        gaps. That is the intended trade -- but only if it is visible, so the
+        reader knows to reach for --capture rather than trusting an apparently
+        complete log.
+        """
         from logmon import tui
 
-        original, tui.MAX_ROWS = tui.MAX_ROWS, 10
+        saved = tui.MAX_APPEND_PER_TICK
+        tui.MAX_APPEND_PER_TICK = 5
         try:
-            app = self.make_app(stream([i % 4 for i in range(50)]), chunk=16)
+            n = 400
+            app = self.make_app(stream([i % 4 for i in range(n)]), chunk=4096)
             async with app.run_test(size=(100, 24)):
-                table = await self.settle(app, 10)
-                for _ in range(30):
-                    await asyncio.sleep(0.02)
-                self.assertEqual(app.decoder.stats.packets, 50)
-                self.assertEqual(table.row_count, 10)
-                self.assertEqual(len(app._row_keys), 10)
+                table = self.query_table(app)
+                await self.absorb(app, n)
+                self.assertEqual(app.decoder.stats.packets, n)
+                self.assertGreater(table.row_count, 0)
+                self.assertGreater(
+                    app.dropped, 0,
+                    "records outran the render cap but nothing was counted "
+                    "as dropped",
+                )
+                # Every decoded record is either on screen or counted.
+                self.assertEqual(table.row_count + app.dropped, n)
         finally:
-            tui.MAX_ROWS = original
+            tui.MAX_APPEND_PER_TICK = saved
 
     async def test_pause_holds_rows_then_drains(self):
         import asyncio
