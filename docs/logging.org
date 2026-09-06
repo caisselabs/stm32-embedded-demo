@@ -74,9 +74,16 @@ To add a third sink, write it next to the other two with an ~init()~ and a
 templated ~operator()(stdx::span<std::uint32_t const, N>)~, and add it to the
 tuple. Nothing else changes.
 
-~app_log::init_sinks()~ calls ~init()~ on each sink in the tuple. ~app_run()~
-calls it before its first log line: a sink cannot be brought up by one of the
-lifecycle flows, because those flows log.
+~app_log::module~ (~src/logging/log_module.hpp~) brings the sinks up: it is a
+cib component whose ~INIT_SINKS~ step extends the ~base_flow::pre_init~ flow and
+calls ~init()~ on each sink in the tuple. That flow is declared with
+~flow::log_policies::none~, so it is the one lifecycle flow that emits no log
+line of its own and is therefore the only one that can bring up a sink. Every
+other flow runs after it and is free to log.
+
+Anything else that has to happen before the first log line --- a clock or a GPIO
+a sink depends on --- goes in the same flow and orders itself against
+~INIT_SINKS~ with ~>>~ rather than being called from ~app_run()~.
 
 Note that ~enabled_sinks~ determines the type of ~logging::config<>~, which is
 why every translation unit that logs has to include this one header rather than

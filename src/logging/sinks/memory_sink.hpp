@@ -43,8 +43,8 @@ inline buffer_t buffer{};
 
 struct memory_sink {
    // Nothing to bring up -- the buffer is statically initialized. Present so
-   // that every sink offers the same interface and app_log::init_sinks() can
-   // call it uniformly.
+   // that every sink offers the same interface and app_log::module's
+   // pre_init step can call it uniformly.
    static auto init() -> void {}
 
    // The call operator is a template, so it is instantiated once per packet

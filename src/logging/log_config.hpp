@@ -22,7 +22,6 @@
 
 #include <stdx/ct_string.hpp>
 #include <stdx/tuple.hpp>
-#include <stdx/tuple_algorithms.hpp>
 #include <stdx/type_traits.hpp>
 
 #include <cstdint>
@@ -35,12 +34,9 @@ namespace app_log {
 // The list of sinks for logging
 constexpr auto enabled_sinks = stdx::tuple{memory_sink{}, usart2_sink{}};
 
-// Bring up whatever hardware the enabled sinks need. Call this before the
-// first log call site: a sink cannot be initialized by a flow that logs, and
-// app_run() logs before it runs any flow at all.
-inline auto init_sinks() -> void {
-   stdx::for_each([]<typename S>(S) { S::init(); }, enabled_sinks);
-}
+// Sinks are brought up by app_log::module (logging/log_module.hpp), which
+// registers a step in the base_flow::pre_init flow. That flow is declared with
+// flow::log_policies::none, so nothing logs before the sinks exist.
 
 // Reported by CIB_LOG_VERSION(). `build_id` is what a decoder keys on to pick
 // the matching string catalog, so bump it whenever the catalog changes.
