@@ -8,6 +8,14 @@
 #include <cib/cib.hpp>
 #include <interrupt/module.hpp>
 
+#include <base_flows.hpp>
+#include <logging/log_module.hpp>
+
 struct project_nexus {
-   constexpr static auto config = cib::components<interrupt::module>;
+   constexpr static auto config = //
+       cib::components<           //
+           base_flow::module,     //
+           app_log::module,       //
+           interrupt::module      //
+           >;
 };
