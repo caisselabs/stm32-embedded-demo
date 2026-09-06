@@ -351,7 +351,7 @@ only module that would change.
 | file                             | covers                                             |
 |----------------------------------+----------------------------------------------------|
 | ~tools/test/test_unwrap_log.py~  | ~unwrap_log.py~ --- 25 tests                       |
-| ~tools/test/test_logmon.py~      | everything under ~logmon~'s UI --- 15 tests        |
+| ~tools/test/test_logmon.py~      | everything under ~logmon~'s UI --- 23 tests        |
 
 ~test_unwrap_log.py~ checks ring-model equivalence across capacities and wrap
 points, the CLI contract the pipeline depends on (packets on stdout, progress
@@ -373,12 +373,19 @@ alignments. Two are worth calling out:
 ~TuiTest~ drives the Textual app headlessly through Textual's own test pilot:
 a replay landing as rows, undecodable words appearing rather than killing the
 app, the row cap trimming oldest-first, pause holding and then draining, byte
-alignment resolved in the UI, and the status bar's markup rendering as style
-rather than literal text. These reach APIs the decoder tests never touch ---
-~DataTable.remove_row~, worker threads, the pause path --- so a Textual
-upgrade that moves one of them fails here instead of at the bench. They skip
-themselves when ~logmon.tui~ will not import --- textual missing, or a textual
-too old to have what it imports.
+alignment resolved in the UI, the status bar's markup rendering as style
+rather than literal text, and ~q~ actually ending the reader thread. These
+reach APIs the decoder tests never touch --- ~DataTable.remove_row~, worker
+threads, the pause path --- so a Textual upgrade that moves one of them fails
+here instead of at the bench. They skip themselves when ~logmon.tui~ will not
+import --- textual missing, or a textual too old to have what it imports.
+
+The quit test is worth a note. A Textual thread worker cannot be interrupted,
+only asked to stop, so a reader that ignores cancellation keeps the process
+alive after the UI is gone --- the symptom is ~q~ blanking the screen and
+then hanging. Its fake source is endless for far longer than the assertion
+waits but not forever: a genuinely infinite one would make a regression hang
+the suite instead of failing it, and a hung CI job is worse than a red one.
 
 ~tools/CMakeLists.txt~ registers both with ~add_unit_test(... PYTEST ...)~,
 which names them ~PYTHON.unwrap_log_test~ and ~PYTHON.logmon_test~ in ctest and
