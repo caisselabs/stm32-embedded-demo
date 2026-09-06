@@ -23,6 +23,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Footer, Static
+from textual.worker import get_current_worker
 
 from .catalog import Catalog
 from .cib import load_mipi_messages
@@ -105,9 +106,23 @@ class LogMonApp(App):
 
     @work(thread=True, exclusive=True)
     def read_source(self) -> None:
+        # A thread worker cannot be interrupted, only asked to stop: Textual's
+        # App._shutdown() calls workers.cancel_all(), which sets this flag and
+        # then waits. A live SerialSource iterates forever (a quiet link just
+        # yields b""), so without this check the thread outlives the UI and the
+        # process hangs after `q` with nothing on screen.
+        #
+        # SerialSource reads with a 0.1s timeout, so the flag is seen within
+        # about that long. Leaving the loop lets the `with` close the port on
+        # the thread that opened it, rather than closing it underneath a read
+        # in flight from another thread.
+        worker = get_current_worker()
         pending = bytearray()
         with self.source as src:
             for chunk in src:
+                if worker.is_cancelled:
+                    return
+
                 if self.capture and chunk:
                     self.capture.write(chunk)
                     self.capture.flush()

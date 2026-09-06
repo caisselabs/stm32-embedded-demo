@@ -19,6 +19,8 @@ import os
 import struct
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -304,6 +306,81 @@ class TuiTest(unittest.IsolatedAsyncioTestCase):
         path = Path(self.tmp.name) / "cap.bin"
         path.write_bytes(data)
         return path
+
+    def make_endless_app(self):
+        """An app whose source never ends, the way a serial port never ends."""
+        from logmon.sources import Source
+        from logmon.tui import LogMonApp
+
+        class EndlessSource(Source):
+            """Endless for the length of the test, then self-terminating.
+
+            A truly infinite source would make a regression *hang* the suite
+            rather than fail it, and a hung CI job is worse than a red one.
+            The deadline is far longer than the assertion below waits, so the
+            test still fails on its own merits; it only guarantees the thread
+            eventually dies so the process can exit and report.
+            """
+
+            name = "endless"
+            DEADLINE = 8.0
+
+            def __init__(self):
+                self.closed = False
+                self.reads = 0
+
+            def __iter__(self):
+                giveup = time.monotonic() + self.DEADLINE
+                while time.monotonic() < giveup:
+                    self.reads += 1
+                    # Stand in for SerialSource's read timeout on a quiet link.
+                    time.sleep(0.01)
+                    yield b""
+
+            def close(self):
+                self.closed = True
+
+        src = EndlessSource()
+        return LogMonApp(src, self.catalog, 0), src
+
+    async def test_quit_stops_the_reader_thread(self):
+        """`q` must end the worker, not just tear down the UI.
+
+        A thread worker cannot be interrupted, so an endless source keeps the
+        thread -- and therefore the process -- alive after the TUI is gone.
+        The worker has to poll for cancellation. Asserted by way of the source
+        being closed, which only happens when the loop is left and the `with`
+        unwinds.
+        """
+        app, src = self.make_endless_app()
+        async with app.run_test() as pilot:
+            for _ in range(50):
+                await pilot.pause()
+                if src.reads:
+                    break
+            self.assertTrue(src.reads, "reader thread never started")
+            await pilot.press("q")
+
+        # run_test() exiting means App._shutdown() ran and cancelled workers.
+        for _ in range(200):
+            if src.closed:
+                break
+            time.sleep(0.01)
+        self.assertTrue(
+            src.closed,
+            "reader thread did not exit after quit: the source was never "
+            "closed, so the `with` in read_source() never unwound",
+        )
+
+        leaked = [
+            t for t in threading.enumerate()
+            if t.is_alive() and not t.daemon and t is not threading.main_thread()
+            and "asyncio" not in t.name.lower()
+        ]
+        self.assertEqual(
+            [t.name for t in leaked], [],
+            "non-daemon threads still running after quit; the process would hang",
+        )
 
     def make_app(self, data, align=0, chunk=8):
         from logmon.sources import FileSource
