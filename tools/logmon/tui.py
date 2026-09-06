@@ -27,10 +27,9 @@ from textual.worker import get_current_worker
 
 from .catalog import Catalog
 from .cib import load_mipi_messages
-from .decode import Decoder, detect_alignment
+from .decode import Aligner, Decoder
 
 MAX_ROWS = 20000
-SAMPLE = 64
 
 
 def shorten(text: str, limit: int = 44) -> str:
@@ -78,7 +77,8 @@ class LogMonApp(App):
         self.catalog = catalog
         self.align = None if align == "auto" else align
         self.capture = capture
-        self.decoder = Decoder(catalog, mipi=load_mipi_messages())
+        self._mipi = load_mipi_messages()
+        self.decoder = Decoder(catalog, mipi=self._mipi)
         self.queue: queue.Queue = queue.Queue()
         # Records drained off the worker's queue but not yet shown. Pausing
         # holds rows here rather than dropping them, so a pause taken to read
@@ -117,7 +117,7 @@ class LogMonApp(App):
         # the thread that opened it, rather than closing it underneath a read
         # in flight from another thread.
         worker = get_current_worker()
-        pending = bytearray()
+        aligner = Aligner(self.catalog, self._mipi, align=self.align)
         with self.source as src:
             for chunk in src:
                 if worker.is_cancelled:
@@ -127,16 +127,16 @@ class LogMonApp(App):
                     self.capture.write(chunk)
                     self.capture.flush()
 
-                if self.align is None:
-                    pending += chunk
-                    if len(pending) < SAMPLE:
-                        continue
-                    self.align = detect_alignment(bytes(pending), self.catalog)
-                    chunk = bytes(pending[self.align:])
-                    pending.clear()
-
-                for record in self.decoder.feed(chunk):
+                data = aligner.feed(chunk)
+                self.align = aligner.align
+                for record in self.decoder.feed(data):
                     self.queue.put((datetime.now(), record))
+
+            # A replay shorter than a full sample still has to land.
+            tail = aligner.flush()
+            self.align = aligner.align
+            for record in self.decoder.feed(tail):
+                self.queue.put((datetime.now(), record))
 
     # -- UI ----------------------------------------------------------------
 
