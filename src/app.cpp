@@ -32,6 +32,12 @@ constexpr auto interrupt_manager =
    // Scopes every log below to the "app" module ID rather than the default.
    CIB_LOG_MODULE("app");
 
+   // Bring the log sinks up first. This cannot be a flow: every flow below is
+   // free to log, and the USART2 sink drops anything written before its
+   // peripheral is configured. See src/logging/log_config.hpp for which sinks
+   // are enabled.
+   app_log::init_sinks();
+
    CIB_INFO("Booting");
 
    nexus.init();

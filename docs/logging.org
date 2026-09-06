@@ -36,21 +36,92 @@ plugin and see the symbols.
 
 ** Where the logs go
 
-~src/logging/log_config.hpp~ specializes ~logging::config<>~ with
-~logging::binary::config{app_log::log_destination{}}~.
-
-Every translation unit that logs must include this header --- not
-~<log/log.hpp>~ --- so that all of them see the same specialization. Two TUs
-seeing different specializations is an ODR violation.
-
-The destination is currently a circular buffer of 32-bit words in RAM
-(~app_log::buffer~). There is no log transport on the board yet; replace
-~log_destination::operator()~ with a UART/SWO writer when there is one, and
-nothing else has to change.
+~src/logging/log_config.hpp~ specializes ~logging::config<>~. Every
+translation unit that logs must include this header --- not ~<log/log.hpp>~
+--- so that all of them see the same specialization. Two TUs seeing different
+specializations is an ODR violation.
 
 ~logging::binary::log_writer~ wraps each destination call in
 ~conc::call_in_critical_section~, so logging from an ISR is safe given
 ~hal::concurrency_policy~.
+
+*** Sinks
+
+The binary logger's destination list is variadic: ~log_writer~ hands each
+encoded packet to every destination in turn. So sinks compose, and which ones
+are built in is a one-line source decision --- the ~enabled_sinks~ tuple in
+~src/logging/log_config.hpp~:
+
+#+begin_src cpp
+constexpr auto enabled_sinks = stdx::tuple{memory_sink{}, usart2_sink{}};
+#+end_src
+
+| sink                   | header                              |
+|------------------------+-------------------------------------|
+| ~app_log::memory_sink~ | ~src/logging/sinks/memory_sink.hpp~ |
+| ~app_log::usart2_sink~ | ~src/logging/sinks/usart2_sink.hpp~ |
+
+Drop an element to remove that sink. It is not merely bypassed at run time ---
+its code is never instantiated. With only ~memory_sink{}~ the image holds no
+reference to the USART2 registers at all; with only ~usart2_sink{}~ there is no
+~app_log::buffer~ symbol and the 1KB ring is reclaimed.
+
+An empty tuple is fine and builds: call sites still encode packets, and the
+encoded words go nowhere. That is a reasonable thing to want --- it costs the
+encoding but nothing else --- so it is not diagnosed.
+
+To add a third sink, write it next to the other two with an ~init()~ and a
+templated ~operator()(stdx::span<std::uint32_t const, N>)~, and add it to the
+tuple. Nothing else changes.
+
+~app_log::init_sinks()~ calls ~init()~ on each sink in the tuple. ~app_run()~
+calls it before its first log line: a sink cannot be brought up by one of the
+lifecycle flows, because those flows log.
+
+Note that ~enabled_sinks~ determines the type of ~logging::config<>~, which is
+why every translation unit that logs has to include this one header rather than
+building a config of its own.
+
+*** The memory sink
+
+A circular buffer of 32-bit words in RAM (~app_log::buffer~), dumped from the
+debugger. Needs no hardware and survives a halt, so it keeps working on a bare
+board with nothing but a debugger attached. See /Offline: dumping the ring
+buffer/ below.
+
+*** The USART2 sink
+
+On the NUCLEO-L432KC, USART2 is wired to the ST-LINK virtual COM port, so this
+puts the packet stream on ~/dev/ttyACM0~ where ~tools/logmon~ decodes it live.
+
+~hal::usart2_tx~ (~src/stm32l432/hal/usart_hal.hpp~) is the driver; the sink
+itself only splits each packet word into four little-endian bytes.
+
+**** Wiring
+[
+- ~PA2~ --- ~USART2_TX~, ~AF7~. Transmit only; ~PA15~ (~USART2_RX~) is left
+  unconfigured, since nothing sends to the target.
+- 8N1, no parity, oversampling by 16.
+- ~APP_LOG_USART2_BAUD~ (default 115200) must match ~logmon --baud~.
+
+The USART kernel clock is switched to HSI16 rather than PCLK, so the baud
+divisor is a constant regardless of what the rest of the clock tree is doing
+--- the log transport keeps working if SYSCLK is later reconfigured. At 16 MHz
+and 115200 baud ~BRR~ is 139, a 0.08% error. The cost is leaving HSI16
+running.
+
+**** Cost
+
+~hal::usart2_tx::write()~ blocks until the transmit register is free, and the
+logger calls its destinations from inside a critical section. So a log call
+site holds interrupts off for roughly 350us per packet word at 115200 baud.
+That is fine for a demo and deliberately simple; a buffered or DMA-fed version
+is the way out.
+
+~write()~ returns as soon as ~TDR~ is free, which is one character time before
+the wire is idle. Anything that halts or resets the core immediately after
+logging --- a breakpoint, a fault handler --- should call
+~hal::usart2_tx::drain()~ first or lose the tail.
 
 ** Using it
 
@@ -167,7 +238,9 @@ but it becomes possible as soon as something logs with runtime arguments.
 *** Live: monitoring over serial
 
 ~tools/logmon~ reads the packet stream off the target's serial line and
-decodes it as it arrives.
+decodes it as it arrives. The firmware end is ~app_log::usart2_sink~ above;
+keep it in ~enabled_sinks~ (it is there by default) and the board talks as soon
+as ~app_run()~ starts.
 
 #+begin_src sh
 # live, with the TUI
