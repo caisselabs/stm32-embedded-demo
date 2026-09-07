@@ -11,6 +11,7 @@
 
 #include <app.hpp>
 #include <base_flows.hpp>
+#include <hal/clock_hal.hpp>
 #include <hal/concurrency_hal.hpp>
 #include <hal/interrupt_hal.hpp>
 #include <interrupt_config.hpp>
@@ -18,8 +19,8 @@
 #include <project.hpp>
 
 extern "C" {
-// called by startup code prior to main
-void SystemInit() {}
+// Called by the startup code after .data and .bss are set up but before main.
+void SystemInit() { hal::clock::init(); }
 }
 
 using nexus_t = cib::nexus<project_nexus>;

@@ -18,7 +18,7 @@ add_versioned_package("gh:intel/cpp-baremetal-concurrency#b8a486a")
 add_versioned_package("gh:intel/cpp-std-extensions#138f5b3")
 add_versioned_package("gh:intel/cpp-baremetal-senders-and-receivers#ffb0a7a")
 add_versioned_package("gh:intel/generic-register-operation-optimizer#2e45cc2")
-add_versioned_package("gh:caisselabs/stm32-groov#a57ccb1")
+add_versioned_package("gh:caisselabs/stm32-groov#5d6ceb2")
 add_versioned_package("gh:intel/compile-time-init-build#7d269d4")
 
 if(NOT CMAKE_CROSSCOMPILING)
