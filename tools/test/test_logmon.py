@@ -138,6 +138,17 @@ class DecoderTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def catalog_packet(self, msg_id, args):
+        """A MIPI Catalog packet: header word, ID word, then one word per arg."""
+        mipi = cib.load_mipi_messages()
+        header = mipi.HeaderStruct()
+        header.type = 3  # Catalog
+        header.severity = 4  # INFO
+        header.module = 0
+        header.subtype = 1
+        return (bytes(header) + struct.pack("<I", msg_id)
+                + b"".join(struct.pack("<I", a) for a in args))
+
     def texts(self, records):
         return [r.text for r in records if r.ok]
 
@@ -167,6 +178,44 @@ class DecoderTest(unittest.TestCase):
         self.assertEqual(self.decoder.pending, 3)
         out = self.decoder.feed(stream([0])[3:])
         self.assertEqual(self.texts(out), ["alpha"])
+
+    def test_partial_packet_with_arguments_is_held_not_fatal(self):
+        """A Catalog packet cut mid-arguments must wait, not crash.
+
+        The zero-argument messages the rest of these tests use never reach
+        CIB's convert(), so they never exercised this path. An argument that
+        runs off the end raises struct.error -- which derives from Exception,
+        not ValueError -- and decode.py used to let it escape and kill logmon.
+
+        It showed up the moment firmware started logging messages with several
+        arguments: a 28-byte packet is larger than a typical serial read, so
+        almost every read landed mid-packet.
+        """
+        import json
+
+        # Its own catalog: the shared one is asserted on by CatalogTest, and
+        # none of its messages take arguments.
+        path = Path(self.tmp.name) / "args.json"
+        path.write_text(json.dumps({
+            "messages": [{"id": 4, "msg": "five {} {} {} {} {}", "type": "msg",
+                          "arg_types": ["encode_u32<unsigned char>"] * 5,
+                          "args": [], "tags": []}],
+            "modules": [{"id": 0, "string": "app"}],
+            "enums": {},
+        }))
+        catalog = Catalog.load(path)
+
+        data = self.catalog_packet(msg_id=4, args=[1, 2, 3, 4, 5])
+        expected = ["INFO [app] five 1 2 3 4 5"]
+        for cut in range(4, len(data), 4):
+            with self.subTest(cut=cut):
+                decoder = self.Decoder(catalog)
+                self.assertEqual(decoder.feed(data[:cut]), [])
+                self.assertEqual(decoder.pending, cut)
+                self.assertEqual(self.texts(decoder.feed(data[cut:])), expected)
+
+        # And the whole thing in one go still decodes.
+        self.assertEqual(self.texts(self.Decoder(catalog).feed(data)), expected)
 
     def test_resyncs_after_a_corrupt_word(self):
         data = stream([0]) + struct.pack("<I", 0x0000000F) + stream([1, 2])

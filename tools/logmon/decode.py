@@ -25,9 +25,15 @@ recover on its own:
     rather than one byte -- with raw words, packets are word-aligned relative
     to one another, so once byte alignment is right the boundaries are too.
 
-  * Incomplete vs corrupt. CIB's decoder raises ValueError("Buffer size too
-    small") when it runs off the end of the buffer, which is indistinguishable
-    from a genuinely bad packet by exception type alone. They are told apart by
+  * Incomplete vs corrupt. CIB's decoder signals running off the end of the
+    buffer in two different ways depending on where it ran out:
+    ValueError("Buffer size too small") from the header reads, and
+    struct.error("unpack requires a buffer of N bytes") from convert() when a
+    Catalog message's ARGUMENTS are cut short. struct.error derives straight
+    from Exception, not from ValueError, so it has to be named explicitly --
+    leaving it out turns a routine mid-packet read into a crash, and only for
+    messages that carry arguments. Neither is distinguishable from a genuinely
+    bad packet by exception type alone. They are told apart by
     whether the decoder consumed everything available: if it did, more bytes
     may still arrive and we wait; if bytes remained, the packet is bad. A
     packet that stays undecodable past MAX_PACKET_BYTES is treated as corrupt
@@ -147,7 +153,8 @@ class Decoder:
                 self.catalog.modules,
                 self.catalog.db,
             )
-        except (ValueError, AssertionError, StopIteration, KeyError) as e:
+        except (ValueError, AssertionError, StopIteration, KeyError,
+                struct.error) as e:
             ran_off_the_end = it.count >= len(self._buf)
             if ran_off_the_end and len(self._buf) < MAX_PACKET_BYTES:
                 raise _Incomplete from e
